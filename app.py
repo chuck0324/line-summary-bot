@@ -11,7 +11,10 @@ from linebot.v3.messaging import (
     TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
-import google.generativeai as genai
+# 刪除舊的：import google.generativeai as genai
+# 改為新的 SDK import：
+from google import genai
+
 
 app = Flask(__name__)
 
@@ -28,6 +31,11 @@ if GEMINI_API_KEY:
     # 使用 gemini-1.5-flash-latest 避開 404 錯誤
     #Google API 對於 v1beta 的模型名稱解析較為嚴格，不允許帶有 -latest 尾綴。請將 app.py 中初始化模型的宣告改為 gemini-1.5-flash（不帶 -latest），並手動指定 API 版本為 v1
     model = genai.GenerativeModel('gemini-pro')
+    # 刪除舊的：genai.configure(api_key=...)
+# 刪除舊的：model = genai.GenerativeModel(...)
+
+# 改為初始化 client（自動讀取環境變數 GEMINI_API_KEY）
+client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 group_chat_history = {}
 
 @app.route("/callback", methods=['POST'])
@@ -64,7 +72,14 @@ def handle_message(event):
                 try:
                     full_logs = "\n".join(group_chat_history[group_id][-100:])
                     prompt = f"請幫我針對以下 LINE 群組對話紀錄進行重點摘要與待辦事項整理：\n\n{full_logs}"
-                    response = model.generate_content(prompt)
+                    # 修改前：
+                    # response = model.generate_content(prompt)
+
+                    # 修改後（改用 client 呼叫 gemini-2.5-flash 或 gemini-1.5-flash）：
+                    response = client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=prompt
+                    )
                     reply_text = response.text
                 except Exception as ai_err:
                     print(f"Gemini 呼叫失敗: {ai_err}", file=sys.stderr)
