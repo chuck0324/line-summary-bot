@@ -27,8 +27,7 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     # 使用 gemini-1.5-flash-latest 避開 404 錯誤
     #Google API 對於 v1beta 的模型名稱解析較為嚴格，不允許帶有 -latest 尾綴。請將 app.py 中初始化模型的宣告改為 gemini-1.5-flash（不帶 -latest），並手動指定 API 版本為 v1
-    model = genai.GenerativeModel('gemini-1.5-flash')
-
+    model = genai.GenerativeModel('gemini-pro')
 group_chat_history = {}
 
 @app.route("/callback", methods=['POST'])
