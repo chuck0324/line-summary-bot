@@ -66,9 +66,9 @@ def handle_message(event):
                     full_logs = "\n".join(group_chat_history[group_id][-100:])
                     prompt = f"請幫我針對以下 LINE 群組對話紀錄進行重點摘要與待辦事項整理：\n\n{full_logs}"
                     
-                    # 呼叫 Gemini 2.5 Flash 模型
+                    # 呼叫 Gemini 3.7 Flash 模型
                     response = client.models.generate_content(
-                        model='gemini-2.5-flash',
+                        model='gemini-3.7-flash',
                         contents=prompt
                     )
                     reply_text = response.text
