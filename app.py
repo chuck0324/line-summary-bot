@@ -17,14 +17,20 @@ import google.generativeai as genai
 
 app = Flask(__name__)
 
-# ==================== 環境變數設定 ====================
+# ==================== 環境變數設定與檢查 ====================
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-if not ALL_ENV_PRESENT := all([LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN, GEMINI_API_KEY, DATABASE_URL]):
-    print("錯誤：請確認 LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN, GEMINI_API_KEY, DATABASE_URL 均已設定！")
+missing_envs = []
+if not LINE_CHANNEL_SECRET: missing_envs.append("LINE_CHANNEL_SECRET")
+if not LINE_CHANNEL_ACCESS_TOKEN: missing_envs.append("LINE_CHANNEL_ACCESS_TOKEN")
+if not GEMINI_API_KEY: missing_envs.append("GEMINI_API_KEY")
+if not DATABASE_URL: missing_envs.append("DATABASE_URL")
+
+if missing_envs:
+    print(f"❌ 錯誤：缺少以下環境變數: {', '.join(missing_envs)}")
     sys.exit(1)
 
 # 初始化 LINE SDK
