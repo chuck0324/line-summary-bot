@@ -365,6 +365,7 @@ def handle_message(event):
                     response = client.models.generate_content(model='gemini-3.5-flash', contents=prompt)
                     reply_text = response.text
                 except Exception as ai_err:
+                    print(f"Summary Error: {ai_err}", file=sys.stderr)
                     reply_text = f"摘要產出失敗：{ai_err}"
 
         # 2. 綺語
@@ -448,7 +449,8 @@ def handle_message(event):
                 try:
                     res = client.models.generate_content(model='gemini-3.5-flash', contents=prompt)
                     reply_text = f"🎲 今天的命定美食是：【{chosen}】！\n\n💡 {res.text}"
-                except:
+                except Exception as ai_err:
+                    print(f"Food Error: {ai_err}", file=sys.stderr)
                     reply_text = f"🎲 今天的命定美食是：【{chosen}】！"
 
         # 11. 黑歷史成語產生器
@@ -475,6 +477,7 @@ def handle_message(event):
                     res = client.models.generate_content(model='gemini-3.5-flash', contents=prompt)
                     reply_text = f"📜 【{target_name} 專屬黑歷史成語】\n\n{res.text}"
             except Exception as e:
+                print(f"History Error: {e}", file=sys.stderr)
                 reply_text = f"生成黑歷史成語失敗：{e}"
 
         # 12. 默契大考驗 - 出題
@@ -485,6 +488,7 @@ def handle_message(event):
                 group_games[group_id] = {'question': res.text, 'answers': {}}
                 reply_text = f"🎮 【默契大考驗】題目來了！\n\n{res.text}\n\n👉 請成員輸入 `!回答 A` 或 `!回答 B` 來下注！"
             except Exception as e:
+                print(f"Game Quiz Error: {e}", file=sys.stderr)
                 reply_text = f"出題失敗：{e}"
 
         # 13. 默契大考驗 - 回答
@@ -510,6 +514,7 @@ def handle_message(event):
                         reply_text = f"🎯 【默契結算】\n\n成員選擇：\n{ans_summary}\n\n🤖 Gemini 裁判講評：\n{res.text}"
                         del group_games[group_id]
                     except Exception as e:
+                        print(f"Game Ans Error: {e}", file=sys.stderr)
                         reply_text = f"結算失敗：{e}"
 
         # 14. AI 智能問答（僅限 !問, ！問, !q, ！q）
@@ -524,7 +529,7 @@ def handle_message(event):
                 ask_prompt = f"你是一個樂於助人的 LINE 群組 AI 助手。請用簡明、親切且精準的繁體中文回答以下問題：\n\n{user_question}"
                 response = client.models.generate_content(model='gemini-3.5-flash', contents=ask_prompt)
                 reply_text = response.text
-                except Exception as ai_err:
+            except Exception as ai_err:
                 print(f"Gemini API Error: {ai_err}", file=sys.stderr)
                 reply_text = f"抱歉，我現在有點轉不過來，請稍後再試一次！(錯誤：{ai_err})"
 
