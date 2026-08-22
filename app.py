@@ -1,9 +1,7 @@
 import os
 import sys
-import re
-import random
-from datetime import datetime
-from collections import Counter
+import threading
+import psycopg2
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
@@ -15,561 +13,169 @@ from linebot.v3.messaging import (
     TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
-from google import genai
-import psycopg2
+import google.generativeai as genai
 
 app = Flask(__name__)
 
-LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-DATABASE_URL = os.getenv('DATABASE_URL')
+# ==================== 環境變數設定 ====================
+LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
+if not ALL_ENV_PRESENT := all([LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN, GEMINI_API_KEY, DATABASE_URL]):
+    print("錯誤：請確認 LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN, GEMINI_API_KEY, DATABASE_URL 均已設定！")
+    sys.exit(1)
+
+# 初始化 LINE SDK
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+# 初始化 Google Gemini API
+genai.configure(api_key=GEMINI_API_KEY)
+gemini_model = genai.GenerativeModel("gemini-3.5-flash")
 
-# 記憶體快取
-group_chat_history = {}
-group_games = {}  # 儲存遊戲暫存狀態
-
-# --- Gemini API 自動備援呼叫函式 (3.5 爆額度自動轉 3.0) ---
-
-def call_gemini_with_fallback(prompt):
-    models = ['gemini-3.5-flash', 'gemini-3-flash']
-    last_exception = None
-    
-    for model_name in models:
-        try:
-            response = client.models.generate_content(model=model_name, contents=prompt)
-            return response.text
-        except Exception as e:
-            print(f"Model {model_name} failed: {e}", file=sys.stderr)
-            last_exception = e
-            # 若發生錯誤 (包括 429 額度上限)，繼續嘗試下一個模型
-            continue
-            
-    # 如果所有模型都失敗，拋出最後一個異常
-    raise last_exception
-
-# --- LINE API Profile 抓取真實暱稱 ---
-
-def get_user_name(group_id, user_id):
-    if user_id == 'unknown_user':
-        return "未知用戶"
-    try:
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
-            profile = line_bot_api.get_group_member_profile(group_id, user_id)
-            return profile.display_name
-    except Exception as e:
-        print(f"Get Profile Error for {user_id}: {e}", file=sys.stderr)
-        return f"用戶({user_id[:6]})"
-
-# --- PostgreSQL 資料庫控制 ---
-
+# ==================== PostgreSQL 資料庫操作 ====================
 def get_db_connection():
+    """建立資料庫連線"""
     return psycopg2.connect(DATABASE_URL)
 
-def init_db():
+def get_user_profile(user_id):
+    """讀取使用者的長期特徵記憶"""
     try:
         conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # 1. 聊天紀錄表
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS message_logs (
-                id SERIAL PRIMARY KEY,
-                group_id VARCHAR(255) NOT NULL,
-                user_id VARCHAR(255) NOT NULL,
-                message_text TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # 2. 帳務表
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS expenses (
-                id SERIAL PRIMARY KEY,
-                group_id VARCHAR(255) NOT NULL,
-                payer_name VARCHAR(100) NOT NULL,
-                amount NUMERIC(10, 2) NOT NULL,
-                item_name VARCHAR(255) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # 3. 餐廳清單表
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS restaurants (
-                id SERIAL PRIMARY KEY,
-                group_id VARCHAR(255) NOT NULL,
-                restaurant_name VARCHAR(255) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        conn.commit()
-        cursor.close()
+        cur = conn.cursor()
+        cur.execute("SELECT user_name, profile_summary FROM user_profiles WHERE user_id = %s;", (user_id,))
+        row = cur.fetchone()
+        cur.close()
         conn.close()
-        print("PostgreSQL 所有資料表初始化完成！", file=sys.stderr)
+        if row:
+            return {"name": row[0], "summary": row[1]}
     except Exception as e:
-        print(f"DB Init Error: {e}", file=sys.stderr)
+        print(f"[DB Error] 讀取 Profile 失敗: {e}")
+    return {"name": "成員", "summary": "尚無長期記憶紀錄。"}
 
-init_db()
-
-# --- 基本紀錄與搜尋 ---
-
-def log_message_to_db(group_id, user_id, message_text):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            'INSERT INTO message_logs (group_id, user_id, message_text) VALUES (%s, %s, %s)',
-            (group_id, user_id, message_text)
-        )
-        conn.commit()
-        cursor.close()
-        conn.close()
-    except Exception as e:
-        print(f"DB Log Error: {e}", file=sys.stderr)
-
-def get_custom_leaderboard(group_id, days=1, start_date=None, end_date=None):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        if start_date and end_date:
-            query = '''
-                SELECT user_id, COUNT(*) as msg_count 
-                FROM message_logs 
-                WHERE group_id = %s AND created_at::date BETWEEN %s::date AND %s::date
-                GROUP BY user_id ORDER BY msg_count DESC LIMIT 5
-            '''
-            cursor.execute(query, (group_id, start_date, end_date))
-        else:
-            query = f'''
-                SELECT user_id, COUNT(*) as msg_count 
-                FROM message_logs 
-                WHERE group_id = %s AND created_at >= NOW() - INTERVAL '{days} days'
-                GROUP BY user_id ORDER BY msg_count DESC LIMIT 5
-            '''
-            cursor.execute(query, (group_id,))
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return rows
-    except Exception as e:
-        print(f"DB Leaderboard Error: {e}", file=sys.stderr)
-        return []
-
-def search_db_messages(group_id, keyword, limit=5):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        query = '''
-            SELECT user_id, message_text, created_at 
-            FROM message_logs 
-            WHERE group_id = %s AND message_text LIKE %s 
-            ORDER BY created_at DESC LIMIT %s
-        '''
-        cursor.execute(query, (group_id, f'%{keyword}%', limit))
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return rows
-    except Exception as e:
-        print(f"DB Search Error: {e}", file=sys.stderr)
-        return []
-
-# --- 分帳助手邏輯 ---
-
-def add_expense(group_id, payer_name, amount, item_name):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            'INSERT INTO expenses (group_id, payer_name, amount, item_name) VALUES (%s, %s, %s, %s)',
-            (group_id, payer_name, amount, item_name)
-        )
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"Add Expense Error: {e}", file=sys.stderr)
-        return False
-
-def calculate_expenses(group_id):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT payer_name, amount, item_name FROM expenses WHERE group_id = %s', (group_id,))
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        
-        if not rows:
-            return "目前沒有任何記帳紀錄喔！"
-        
-        total_amount = sum(row[1] for row in rows)
-        payers = set(row[0] for row in rows)
-        person_count = len(payers)
-        avg_amount = total_amount / person_count if person_count > 0 else 0
-        
-        balances = {p: 0.0 for p in payers}
-        details = []
-        for p, amt, item in rows:
-            balances[p] += float(amt)
-            details.append(f"• {p} 付了 ${amt:.0f} ({item})")
+def update_user_profile_async(user_id, user_name, user_msg, bot_reply):
+    """背景非同步提煉並更新使用者的長期記憶"""
+    def task():
+        try:
+            profile = get_user_profile(user_id)
+            old_summary = profile["summary"]
             
-        for p in balances:
-            balances[p] -= float(avg_amount)
-            
-        debtors = []
-        creditors = []
-        for p, bal in balances.items():
-            if bal < -0.01:
-                debtors.append([p, -bal])
-            elif bal > 0.01:
-                creditors.append([p, bal])
-                
-        transfers = []
-        i, j = 0, 0
-        while i < len(debtors) and j < len(creditors):
-            debtor, d_amount = debtors[i]
-            creditor, c_amount = creditors[j]
-            settle_amount = min(d_amount, c_amount)
-            
-            transfers.append(f"👉 {debtor} 應給 {creditor} ${settle_amount:.0f}")
-            
-            debtors[i][1] -= settle_amount
-            creditors[j][1] -= settle_amount
-            
-            if debtors[i][1] < 0.01:
-                i += 1
-            if creditors[j][1] < 0.01:
-                j += 1
+            prompt = f"""
+你是一個長期個人特徵分析助手。請根據以下【舊有特徵與偏好】與【最新一次對話】，更新並提煉出關於成員「{user_name}」的【最新個人特徵摘要】。
 
-        res = [
-            f"💰 【群組結帳統計】",
-            f"總花費：${total_amount:.0f}",
-            f"參與人數：{person_count} 人 (每人均分：${avg_amount:.0f})",
-            "\n【消費明細】"
-        ] + details + ["\n【最佳平帳方案】"] + (transfers if transfers else ["大家費用剛剛好，不用互相轉帳！"])
-        
-        return "\n".join(res)
-    except Exception as e:
-        print(f"Calc Expenses Error: {e}", file=sys.stderr)
-        return "結帳計算失敗，請稍後再試。"
+【舊有特徵與偏好】：
+{old_summary}
 
-def clear_expenses(group_id):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM expenses WHERE group_id = %s', (group_id,))
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"Clear Expenses Error: {e}", file=sys.stderr)
-        return False
+【最新對話】：
+使用者 ({user_name})：{user_msg}
+機器人：{bot_reply}
 
-# --- 美食抽籤邏輯 ---
+請輸出更新後的【最新個人特徵摘要】（包含：喜好、性格特點、常聊話題、特別習慣或背景等，請保持精簡條理，控制在 150 字內）：
+"""
+            response = gemini_model.generate_content(prompt)
+            new_summary = response.text.strip()
 
-def add_restaurant(group_id, name):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('INSERT INTO restaurants (group_id, restaurant_name) VALUES (%s, %s)', (group_id, name))
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"Add Restaurant Error: {e}", file=sys.stderr)
-        return False
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO user_profiles (user_id, user_name, profile_summary, updated_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (user_id) 
+                DO UPDATE SET user_name = EXCLUDED.user_name, profile_summary = EXCLUDED.profile_summary, updated_at = NOW();
+            """, (user_id, user_name, new_summary))
+            conn.commit()
+            cur.close()
+            conn.close()
+            print(f"[Memory Updated] 已成功更新 {user_name} ({user_id}) 的個人記憶！")
+        except Exception as e:
+            print(f"[Memory Error] 更新 Profile 失敗: {e}")
 
-def pick_restaurant(group_id):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT restaurant_name FROM restaurants WHERE group_id = %s', (group_id,))
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        
-        if not rows:
-            return None
-        return random.choice(rows)[0]
-    except Exception as e:
-        print(f"Pick Restaurant Error: {e}", file=sys.stderr)
-        return None
+    # 使用獨立 Thread 在背景執行，不卡住 LINE 訊息回覆速度
+    threading.Thread(target=task).start()
 
-# --- Webhook 主邏輯 ---
+# ==================== Gemini AI 生成邏輯 ====================
+def generate_ai_response(user_id, user_name, user_msg):
+    # 1. 撈取長期記憶
+    profile = get_user_profile(user_id)
+    user_summary = profile["summary"]
+
+    # 2. 組合 System Instruction
+    system_instruction = f"""
+你是一個活潑、在地且貼心的 LINE 群組機器人助手。
+你現在正在和成員【{user_name}】對話。
+
+【關於 {user_name} 的長期了解與個人偏好】：
+{user_summary}
+
+請根據以上長期了解，用自然、親切且符合人設的口吻回覆【{user_name}】的發言。不需要太過正式，像熟絡的朋友聊天即可。
+"""
+
+    prompt = f"使用者【{user_name}】說：{user_msg}"
+
+    # 3. 呼叫 Gemini 3.5 Flash
+    response = gemini_model.generate_content(
+        contents=[system_instruction, prompt]
+    )
+    bot_reply = response.text.strip()
+
+    # 4. 啟動背景 Task 提煉並更新記憶
+    update_user_profile_async(user_id, user_name, user_msg, bot_reply)
+
+    return bot_reply
+
+# ==================== Flask Webhook 路由 ====================
+@app.route("/", methods=['GET'])
+def index():
+    return "LINE Bot Status: Active"
 
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers.get('X-Line-Signature')
     body = request.get_data(as_text=True)
+
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
+        print("Invalid signature. Please check your channel access token/channel secret.")
         abort(400)
-    except Exception as e:
-        print(f"Callback 處理發生錯誤: {e}", file=sys.stderr)
+
     return 'OK'
 
+# ==================== LINE 訊息事件處理 ====================
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
+    user_id = event.source.user_id
+    user_msg = event.message.text.strip()
+
+    # 嘗試抓取使用者在 LINE 上的暱稱
+    user_name = "成員"
     try:
-        source_type = event.source.type
-        if source_type == 'group':
-            group_id = event.source.group_id
-        elif source_type == 'room':
-            group_id = event.source.room_id
-        else:
-            group_id = event.source.user_id
-
-        user_id = getattr(event.source, 'user_id', 'unknown_user')
-        user_text = event.message.text.strip()
-
-        if group_id not in group_chat_history:
-            group_chat_history[group_id] = []
-
-        reply_text = None
-
-        # 0. 說明選單 (Help)
-        if user_text in ["!help", "！help", "help", "說明", "指令"]:
-            reply_text = """🤖 【群組小幫手使用說明】
-(全形『！』或半形『!』皆可觸發)
-
-🤖 AI 問答與對話整理
-• `!問 [問題]` 或 `!q [問題]`：向 Gemini 發問
-• `摘要` 或 `摘要 50`：自動分類並整理近期對話重點與待辦
-
-👑 排行榜與歷史搜尋
-• `今日廢話王`：查看今天的發言王
-• `廢話王 7`：查看近 7 天發言排行榜
-• `搜尋 [關鍵字]`：撈取歷史發言紀錄 (例如: 搜尋 密碼)
-
-🍱 美食抽籤助手
-• `!新增餐廳 [名稱]`：加入口袋名單 (例如: !新增餐廳 鼎泰豐)
-• `!吃什麼` 或 `抽午餐`：隨機抽取命定美食
-
-💰 群組分帳助手
-• `!記帳 [名字] [金額] [品項]`：(例如: !記帳 小明 1200 晚餐)
-• `!算帳`：計算每人均分金額與最佳轉帳方案
-• `!清空帳目`：清空群組歷史帳務
-
-🎮 派對互動遊戲
-• `!黑歷史`：結合歷史發言煉製專屬四字成語
-• `!出題`：發起默契二選一遊戲
-• `!回答 [A/B]`：回答題目並由 Gemini 評定默契值"""
-
-        # 1. 摘要
-        elif re.match(r"^摘要\s*(\d+)?$", user_text):
-            match_summary = re.match(r"^摘要\s*(\d+)?$", user_text)
-            limit = int(match_summary.group(1)) if match_summary.group(1) else 100
-            limit = min(limit, 200)
-
-            if len(group_chat_history[group_id]) == 0:
-                reply_text = "目前還沒有收到新對話喔！"
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            # 優先嘗試抓取群組內 Profile，若無則抓取個人 Profile
+            if event.source.type == "group":
+                profile = line_bot_api.get_group_member_profile(event.source.group_id, user_id)
             else:
-                try:
-                    formatted_logs = [f"[{get_user_name(group_id, m['user_id'])}]: {m['text']}" for m in group_chat_history[group_id][-limit:]]
-                    full_logs = "\n".join(formatted_logs)
-                    prompt = f"你是一個高效率的群組對話整理助手。以下是 LINE 群組的最新對話紀錄：\n1. 話題分類\n2. 主題摘要與待辦事項。\n\n對話紀錄：\n{full_logs}"
-                    reply_text = call_gemini_with_fallback(prompt)
-                except Exception as ai_err:
-                    print(f"Summary Error: {ai_err}", file=sys.stderr)
-                    reply_text = f"摘要產出失敗：{ai_err}"
-
-        # 2. 綺語
-        elif user_text in ["綺語", "綺語榜"]:
-            if not group_chat_history[group_id]:
-                reply_text = "目前還沒有對話紀錄可以統計喔！"
-            else:
-                user_counts = Counter(msg['user_id'] for msg in group_chat_history[group_id])
-                top_users = user_counts.most_common(5)
-                msg_lines = ["🪷 近期「綺語」排行榜："]
-                for rank, (uid, count) in enumerate(top_users, 1):
-                    msg_lines.append(f"第 {rank} 名: {get_user_name(group_id, uid)} ({count} 則訊息)")
-                reply_text = "\n".join(msg_lines)
-
-        # 3. 今日廢話王
-        elif user_text == "今日廢話王":
-            leaderboard = get_custom_leaderboard(group_id, days=1)
-            if not leaderboard:
-                reply_text = "今日還沒有足夠的對話紀錄喔！"
-            else:
-                msg_lines = [f"👑 今日廢話王排行榜 ({datetime.now().strftime('%Y-%m-%d')})："]
-                for rank, (uid, count) in enumerate(leaderboard, 1):
-                    msg_lines.append(f"第 {rank} 名: {get_user_name(group_id, uid)} ({count} 則發言)")
-                reply_text = "\n".join(msg_lines)
-
-        # 4. 自訂天數廢話王
-        elif re.match(r"^廢話王\s*(\d+)\s*天?$", user_text):
-            days = int(re.match(r"^廢話王\s*(\d+)\s*天?$", user_text).group(1))
-            leaderboard = get_custom_leaderboard(group_id, days=days)
-            if not leaderboard:
-                reply_text = f"近 {days} 天還沒有足夠的對話紀錄喔！"
-            else:
-                msg_lines = [f"👑 近 {days} 天廢話王排行榜："]
-                for rank, (uid, count) in enumerate(leaderboard, 1):
-                    msg_lines.append(f"第 {rank} 名: {get_user_name(group_id, uid)} ({count} 則發言)")
-                reply_text = "\n".join(msg_lines)
-
-        # 5. 搜尋歷史發言
-        elif re.match(r"^(搜尋|找|查)\s*(.+)$", user_text):
-            keyword = re.match(r"^(搜尋|找|查)\s*(.+)$", user_text).group(2).strip()
-            results = search_db_messages(group_id, keyword)
-            if not results:
-                reply_text = f"🔍 找不到與「{keyword}」相關的歷史留言喔！"
-            else:
-                msg_lines = [f"🔍 找到與「{keyword}」相關的最新 5 則留言："]
-                for uid, msg, created_at in results:
-                    msg_lines.append(f"• [{created_at.strftime('%m/%d %H:%M')}] {get_user_name(group_id, uid)}: {msg}")
-                reply_text = "\n".join(msg_lines)
-
-        # 6. 分帳助手 - 記帳
-        elif re.match(r"^[!！]記帳\s+(\S+)\s+(\d+(\.\d+)?)\s+(.+)$", user_text):
-            m = re.match(r"^[!！]記帳\s+(\S+)\s+(\d+(\.\d+)?)\s+(.+)$", user_text)
-            p_name, amt, item = m.group(1), float(m.group(2)), m.group(4)
-            if add_expense(group_id, p_name, amt, item):
-                reply_text = f"✅ 已記錄：{p_name} 付了 ${amt:.0f} ({item})"
-            else:
-                reply_text = "記帳失敗，請稍後再試。"
-
-        # 7. 分帳助手 - 算帳
-        elif user_text in ["!算帳", "！算帳", "!結帳", "！結帳"]:
-            reply_text = calculate_expenses(group_id)
-
-        # 8. 分帳助手 - 清空帳目
-        elif user_text in ["!清空帳目", "！清空帳目"]:
-            if clear_expenses(group_id):
-                reply_text = "🗑️ 群組帳務資料已全部清空！"
-
-        # 9. 美食抽籤 - 新增餐廳
-        elif re.match(r"^[!！]新增餐廳\s+(.+)$", user_text):
-            r_name = re.match(r"^[!！]新增餐廳\s+(.+)$", user_text).group(1).strip()
-            if add_restaurant(group_id, r_name):
-                reply_text = f"🍱 已新增餐廳：「{r_name}」到口袋名單！"
-
-        # 10. 美食抽籤 - 抽午餐
-        elif user_text in ["!吃什麼", "！吃什麼", "吃什麼", "抽午餐"]:
-            chosen = pick_restaurant(group_id)
-            if not chosen:
-                reply_text = "口袋名單是空的！請先用 `!新增餐廳 [名稱]` 來新增吧！"
-            else:
-                prompt = f"請用非常吸引人且幽默的方式，用兩句話介紹並推薦「{chosen}」這家餐廳當今天的午餐或晚餐選擇。"
-                try:
-                    res_text = call_gemini_with_fallback(prompt)
-                    reply_text = f"🎲 今天的命定美食是：【{chosen}】！\n\n💡 {res_text}"
-                except Exception as ai_err:
-                    print(f"Food Error: {ai_err}", file=sys.stderr)
-                    reply_text = f"🎲 今天的命定美食是：【{chosen}】！"
-
-        # 11. 黑歷史成語產生器
-        elif re.match(r"^[!！]黑歷史(\s+.*)?$", user_text):
-            m_target = re.match(r"^[!！]黑歷史(\s+.*)?$", user_text).group(1)
-            target_name = m_target.strip() if m_target else get_user_name(group_id, user_id)
-            
-            try:
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                cursor.execute('SELECT message_text FROM message_logs WHERE group_id = %s ORDER BY RANDOM() LIMIT 10', (group_id,))
-                rows = cursor.fetchall()
-                cursor.close()
-                conn.close()
-                
-                if not rows:
-                    reply_text = "資料庫裡的歷史留言還不夠多，無法煉製成語！"
-                else:
-                    quotes = "\n".join([f"- {r[0]}" for r in rows])
-                    prompt = f"""請根據以下這些群組歷史發言內容，為「{target_name}」創立一個全新的【四字成語】，並給出嚴肅又搞笑的漢語拼音、釋義與典故出處。
-
-歷史發言參考：
-{quotes}"""
-                    res_text = call_gemini_with_fallback(prompt)
-                    reply_text = f"📜 【{target_name} 專屬黑歷史成語】\n\n{res_text}"
-            except Exception as e:
-                print(f"History Error: {e}", file=sys.stderr)
-                reply_text = f"生成黑歷史成語失敗：{e}"
-
-        # 12. 默契大考驗 - 出題
-        elif user_text in ["!出題", "！出題"]:
-            prompt = "請設計一題超爆笑、具爭議性或令人糾結的「二選一情境選擇題」（例如：一輩子不洗澡 vs 一輩子不刷牙）。請給出題目與 A、B 兩個選項。"
-            try:
-                res_text = call_gemini_with_fallback(prompt)
-                group_games[group_id] = {'question': res_text, 'answers': {}}
-                reply_text = f"🎮 【默契大考驗】題目來了！\n\n{res_text}\n\n👉 請成員輸入 `!回答 A` 或 `!回答 B` 來下注！"
-            except Exception as e:
-                print(f"Game Quiz Error: {e}", file=sys.stderr)
-                reply_text = f"出題失敗：{e}"
-
-        # 13. 默契大考驗 - 回答
-        elif re.match(r"^[!！]回答\s+(.+)$", user_text):
-            ans = re.match(r"^[!！]回答\s+(.+)$", user_text).group(1).strip()
-            if group_id not in group_games or 'question' not in group_games[group_id]:
-                reply_text = "目前沒有進行中的題目，請先輸入 `!出題` 喔！"
-            else:
-                u_name = get_user_name(group_id, user_id)
-                group_games[group_id]['answers'][u_name] = ans
-                
-                ans_dict = group_games[group_id]['answers']
-                if len(ans_dict) < 2:
-                    reply_text = f"✅ {u_name} 已選擇【{ans}】！還需要至少 1 位成員輸入 `!回答` 才能計算默契！"
-                else:
-                    ans_summary = "\n".join([f"• {k}: {v}" for k, v in ans_dict.items()])
-                    prompt = f"""以下是群組遊戲「默契大考驗」的成員選擇：
-{ans_summary}
-
-請評定這些成員之間的默契指數（0% ~ 100%），並用搞笑、犀利的語氣講評他們的選擇與默契程度！"""
-                    try:
-                        res_text = call_gemini_with_fallback(prompt)
-                        reply_text = f"🎯 【默契結算】\n\n成員選擇：\n{ans_summary}\n\n🤖 Gemini 裁判講評：\n{res_text}"
-                        del group_games[group_id]
-                    except Exception as e:
-                        print(f"Game Ans Error: {e}", file=sys.stderr)
-                        reply_text = f"結算失敗：{e}"
-
-        # 14. AI 智能問答（僅限 !問, ！問, !q, ！q）
-        elif re.match(r"^(!問|！問|!q|！q)[:：\s]*(.+)$", user_text, re.IGNORECASE | re.DOTALL):
-            m = re.match(r"^(!問|！問|!q|！q)[:：\s]*(.+)$", user_text, re.IGNORECASE | re.DOTALL)
-            user_question = m.group(2).strip()
-            
-            group_chat_history[group_id].append({'user_id': user_id, 'text': user_text})
-            log_message_to_db(group_id, user_id, user_text)
-
-            try:
-                ask_prompt = f"你是一個樂於助人的 LINE 群組 AI 助手。請用簡明、親切且精準的繁體中文回答以下問題：\n\n{user_question}"
-                reply_text = call_gemini_with_fallback(ask_prompt)
-            except Exception as ai_err:
-                print(f"Gemini API Error: {ai_err}", file=sys.stderr)
-                reply_text = f"抱歉，我現在有點轉不過來，請稍後再試一次！(錯誤：{ai_err})"
-
-        # 15. 一般訊息：紀錄並忽略
-        else:
-            group_chat_history[group_id].append({'user_id': user_id, 'text': user_text})
-            if len(group_chat_history[group_id]) > 200:
-                group_chat_history[group_id].pop(0)
-            log_message_to_db(group_id, user_id, user_text)
-
-        # 統一回傳
-        if reply_text:
-            with ApiClient(configuration) as api_client:
-                line_bot_api = MessagingApi(api_client)
-                line_bot_api.reply_message(
-                    ReplyMessageRequest(
-                        reply_token=event.reply_token,
-                        messages=[TextMessage(text=reply_text)]
-                    )
-                )
-
+                profile = line_bot_api.get_profile(user_id)
+            user_name = profile.display_name
     except Exception as e:
-        print(f"handle_message 發生例外: {e}", file=sys.stderr)
+        print(f"[LINE Profile Error] 抓取使用者暱稱失敗: {e}")
+
+    # 呼叫 Gemini AI 生成回覆
+    reply_text = generate_ai_response(user_id, user_name, user_msg)
+
+    # 回覆訊息給使用者
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.reply_message_with_http_info(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=reply_text)]
+            )
+        )
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
