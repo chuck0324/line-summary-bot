@@ -113,7 +113,7 @@ TYPE: [SELF 或 OTHERS]
 FEATURE: 提煉出的特徵重點
 """
             response = ai_client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.5-flash",
                 contents=prompt
             )
             result_text = response.text.strip()
@@ -202,9 +202,9 @@ def generate_ai_response(user_id, user_name, user_msg):
 
     prompt = f"成員【{user_name}】說：{user_msg}"
 
-    # 3. 呼叫 Gemini
+    # 3. 呼叫 Gemini 3.5 Flash
     response = ai_client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.5-flash",
         contents=[system_instruction, prompt]
     )
     bot_reply = response.text.strip()
