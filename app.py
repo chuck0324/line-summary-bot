@@ -13,7 +13,7 @@ from linebot.v3.messaging import (
     TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
-import google.generativeai as genai
+from google import genai
 
 app = Flask(__name__)
 
@@ -37,9 +37,8 @@ if missing_envs:
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 初始化 Google Gemini API
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-3.5-flash")
+# 初始化 Google Gemini Client (新版 SDK 寫法)
+ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ==================== PostgreSQL 資料庫操作 ====================
 def get_db_connection():
@@ -80,7 +79,10 @@ def update_user_profile_async(user_id, user_name, user_msg, bot_reply):
 
 請輸出更新後的【最新個人特徵摘要】（包含：喜好、性格特點、常聊話題、特別習慣或背景等，請保持精簡條理，控制在 150 字內）：
 """
-            response = gemini_model.generate_content(prompt)
+            response = ai_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt
+            )
             new_summary = response.text.strip()
 
             conn = get_db_connection()
@@ -107,7 +109,7 @@ def generate_ai_response(user_id, user_name, user_msg):
     profile = get_user_profile(user_id)
     user_summary = profile["summary"]
 
-    # 2. 組合 System Instruction
+    # 2. 組合 System Instruction 與 Prompt
     system_instruction = f"""
 你是一個活潑、在地且貼心的 LINE 群組機器人助手。
 你現在正在和成員【{user_name}】對話。
@@ -120,8 +122,9 @@ def generate_ai_response(user_id, user_name, user_msg):
 
     prompt = f"使用者【{user_name}】說：{user_msg}"
 
-    # 3. 呼叫 Gemini 3.5 Flash
-    response = gemini_model.generate_content(
+    # 3. 呼叫 Gemini API (新版 SDK)
+    response = ai_client.models.generate_content(
+        model="gemini-2.5-flash",
         contents=[system_instruction, prompt]
     )
     bot_reply = response.text.strip()
@@ -158,8 +161,8 @@ def handle_message(event):
     # 嘗試抓取使用者在 LINE 上的暱稱
     user_name = "成員"
     try:
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
+        with ApiClient(configuration) as api_client_line:
+            line_bot_api = MessagingApi(api_client_line)
             # 優先嘗試抓取群組內 Profile，若無則抓取個人 Profile
             if event.source.type == "group":
                 profile = line_bot_api.get_group_member_profile(event.source.group_id, user_id)
@@ -173,8 +176,8 @@ def handle_message(event):
     reply_text = generate_ai_response(user_id, user_name, user_msg)
 
     # 回覆訊息給使用者
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
+    with ApiClient(configuration) as api_client_line:
+        line_bot_api = MessagingApi(api_client_line)
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
