@@ -321,9 +321,36 @@ def handle_message(event):
 
         reply_text = None
 
+        # 0. 說明選單 (Help)
+        if user_text in ["!help", "help", "說明", "指令"]:
+            reply_text = """🤖 【群組小幫手使用說明】
+
+🤖 AI 問答與對話整理
+• `!問 [問題]`：向 Gemini 發問 (例如: !問 台北明天天氣)
+• `摘要` 或 `摘要 50`：自動分類並整理近期對話重點與待辦
+
+👑 排行榜與歷史搜尋
+• `今日廢話王`：查看今天的發言王
+• `廢話王 7`：查看近 7 天發言排行榜
+• `搜尋 [關鍵字]`：撈取歷史發言紀錄 (例如: 搜尋 密碼)
+
+🍱 美食抽籤助手
+• `!新增餐廳 [名稱]`：加入口袋名單 (例如: !新增餐廳 鼎泰豐)
+• `!吃什麼` 或 `抽午餐`：隨機抽取命定美食
+
+💰 群組分帳助手
+• `!記帳 [名字] [金額] [品項]`：(例如: !記帳 小明 1200 晚餐)
+• `!算帳`：計算每人均分金額與最佳轉帳方案
+• `!清空帳目`：清空群組歷史帳務
+
+🎮 派對互動遊戲
+• `!黑歷史`：結合歷史發言煉製專屬四字成語
+• `!出題`：發起默契二選一遊戲
+• `!回答 [A/B]`：回答題目並由 Gemini 評定默契值"""
+
         # 1. 摘要
-        match_summary = re.match(r"^摘要\s*(\d+)?$", user_text)
-        if match_summary:
+        elif re.match(r"^摘要\s*(\d+)?$", user_text):
+            match_summary = re.match(r"^摘要\s*(\d+)?$", user_text)
             limit = int(match_summary.group(1)) if match_summary.group(1) else 100
             limit = min(limit, 200)
 
@@ -428,7 +455,6 @@ def handle_message(event):
             m_target = re.match(r"^!黑歷史(\s+.*)?$", user_text).group(1)
             target_name = m_target.strip() if m_target else get_user_name(group_id, user_id)
             
-            # 從 DB 隨機撈 10 則發言
             try:
                 conn = get_db_connection()
                 cursor = conn.cursor()
@@ -481,7 +507,7 @@ def handle_message(event):
                     try:
                         res = client.models.generate_content(model='gemini-3.5-flash', contents=prompt)
                         reply_text = f"🎯 【默契結算】\n\n成員選擇：\n{ans_summary}\n\n🤖 Gemini 裁判講評：\n{res.text}"
-                        del group_games[group_id]  # 清除該局遊戲
+                        del group_games[group_id]
                     except Exception as e:
                         reply_text = f"結算失敗：{e}"
 
