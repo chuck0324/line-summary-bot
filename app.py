@@ -34,6 +34,25 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 group_chat_history = {}
 group_games = {}  # 儲存遊戲暫存狀態
 
+# --- Gemini API 自動備援呼叫函式 (3.5 爆額度自動轉 3.0) ---
+
+def call_gemini_with_fallback(prompt):
+    models = ['gemini-3.5-flash', 'gemini-3-flash']
+    last_exception = None
+    
+    for model_name in models:
+        try:
+            response = client.models.generate_content(model=model_name, contents=prompt)
+            return response.text
+        except Exception as e:
+            print(f"Model {model_name} failed: {e}", file=sys.stderr)
+            last_exception = e
+            # 若發生錯誤 (包括 429 額度上限)，繼續嘗試下一個模型
+            continue
+            
+    # 如果所有模型都失敗，拋出最後一個異常
+    raise last_exception
+
 # --- LINE API Profile 抓取真實暱稱 ---
 
 def get_user_name(group_id, user_id):
@@ -362,8 +381,7 @@ def handle_message(event):
                     formatted_logs = [f"[{get_user_name(group_id, m['user_id'])}]: {m['text']}" for m in group_chat_history[group_id][-limit:]]
                     full_logs = "\n".join(formatted_logs)
                     prompt = f"你是一個高效率的群組對話整理助手。以下是 LINE 群組的最新對話紀錄：\n1. 話題分類\n2. 主題摘要與待辦事項。\n\n對話紀錄：\n{full_logs}"
-                    response = client.models.generate_content(model='gemini-3.5-flash', contents=prompt)
-                    reply_text = response.text
+                    reply_text = call_gemini_with_fallback(prompt)
                 except Exception as ai_err:
                     print(f"Summary Error: {ai_err}", file=sys.stderr)
                     reply_text = f"摘要產出失敗：{ai_err}"
@@ -447,8 +465,8 @@ def handle_message(event):
             else:
                 prompt = f"請用非常吸引人且幽默的方式，用兩句話介紹並推薦「{chosen}」這家餐廳當今天的午餐或晚餐選擇。"
                 try:
-                    res = client.models.generate_content(model='gemini-3.5-flash', contents=prompt)
-                    reply_text = f"🎲 今天的命定美食是：【{chosen}】！\n\n💡 {res.text}"
+                    res_text = call_gemini_with_fallback(prompt)
+                    reply_text = f"🎲 今天的命定美食是：【{chosen}】！\n\n💡 {res_text}"
                 except Exception as ai_err:
                     print(f"Food Error: {ai_err}", file=sys.stderr)
                     reply_text = f"🎲 今天的命定美食是：【{chosen}】！"
@@ -474,8 +492,8 @@ def handle_message(event):
 
 歷史發言參考：
 {quotes}"""
-                    res = client.models.generate_content(model='gemini-3.5-flash', contents=prompt)
-                    reply_text = f"📜 【{target_name} 專屬黑歷史成語】\n\n{res.text}"
+                    res_text = call_gemini_with_fallback(prompt)
+                    reply_text = f"📜 【{target_name} 專屬黑歷史成語】\n\n{res_text}"
             except Exception as e:
                 print(f"History Error: {e}", file=sys.stderr)
                 reply_text = f"生成黑歷史成語失敗：{e}"
@@ -484,9 +502,9 @@ def handle_message(event):
         elif user_text in ["!出題", "！出題"]:
             prompt = "請設計一題超爆笑、具爭議性或令人糾結的「二選一情境選擇題」（例如：一輩子不洗澡 vs 一輩子不刷牙）。請給出題目與 A、B 兩個選項。"
             try:
-                res = client.models.generate_content(model='gemini-3.5-flash', contents=prompt)
-                group_games[group_id] = {'question': res.text, 'answers': {}}
-                reply_text = f"🎮 【默契大考驗】題目來了！\n\n{res.text}\n\n👉 請成員輸入 `!回答 A` 或 `!回答 B` 來下注！"
+                res_text = call_gemini_with_fallback(prompt)
+                group_games[group_id] = {'question': res_text, 'answers': {}}
+                reply_text = f"🎮 【默契大考驗】題目來了！\n\n{res_text}\n\n👉 請成員輸入 `!回答 A` 或 `!回答 B` 來下注！"
             except Exception as e:
                 print(f"Game Quiz Error: {e}", file=sys.stderr)
                 reply_text = f"出題失敗：{e}"
@@ -510,8 +528,8 @@ def handle_message(event):
 
 請評定這些成員之間的默契指數（0% ~ 100%），並用搞笑、犀利的語氣講評他們的選擇與默契程度！"""
                     try:
-                        res = client.models.generate_content(model='gemini-3.5-flash', contents=prompt)
-                        reply_text = f"🎯 【默契結算】\n\n成員選擇：\n{ans_summary}\n\n🤖 Gemini 裁判講評：\n{res.text}"
+                        res_text = call_gemini_with_fallback(prompt)
+                        reply_text = f"🎯 【默契結算】\n\n成員選擇：\n{ans_summary}\n\n🤖 Gemini 裁判講評：\n{res_text}"
                         del group_games[group_id]
                     except Exception as e:
                         print(f"Game Ans Error: {e}", file=sys.stderr)
@@ -527,8 +545,7 @@ def handle_message(event):
 
             try:
                 ask_prompt = f"你是一個樂於助人的 LINE 群組 AI 助手。請用簡明、親切且精準的繁體中文回答以下問題：\n\n{user_question}"
-                response = client.models.generate_content(model='gemini-3.5-flash', contents=ask_prompt)
-                reply_text = response.text
+                reply_text = call_gemini_with_fallback(ask_prompt)
             except Exception as ai_err:
                 print(f"Gemini API Error: {ai_err}", file=sys.stderr)
                 reply_text = f"抱歉，我現在有點轉不過來，請稍後再試一次！(錯誤：{ai_err})"
