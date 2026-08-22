@@ -33,6 +33,21 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 # 記憶體快取 (近 200 則訊息供「綺語」快速查詢)
 group_chat_history = {}
 
+# --- LINE API Profile 抓取真實暱稱 ---
+
+def get_user_name(group_id, user_id):
+    """透過 LINE API 取得使用者的群組顯示名稱"""
+    if user_id == 'unknown_user':
+        return "未知用戶"
+    try:
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            profile = line_bot_api.get_group_member_profile(group_id, user_id)
+            return profile.display_name
+    except Exception as e:
+        print(f"Get Profile Error for {user_id}: {e}", file=sys.stderr)
+        return f"用戶({user_id[:6]})"
+
 # --- PostgreSQL 資料庫控制 ---
 
 def get_db_connection():
@@ -147,7 +162,11 @@ def handle_message(event):
                 reply_text = "目前還沒有收到新對話喔！"
             else:
                 try:
-                    formatted_logs = [f"[{msg['user_id'][:6]}]: {msg['text']}" for msg in group_chat_history[group_id][-limit:]]
+                    formatted_logs = []
+                    for msg in group_chat_history[group_id][-limit:]:
+                        name = get_user_name(group_id, msg['user_id'])
+                        formatted_logs.append(f"[{name}]: {msg['text']}")
+                    
                     full_logs = "\n".join(formatted_logs)
                     
                     prompt = f"""你是一個高效率的群組對話整理助手。以下是 LINE 群組的最新對話紀錄。
@@ -176,7 +195,8 @@ def handle_message(event):
                 
                 msg_lines = ["🪷 近期「綺語」排行榜（前 5 名）："]
                 for rank, (uid, count) in enumerate(top_users, 1):
-                    msg_lines.append(f"第 {rank} 名: {uid[:6]}... ({count} 則訊息)")
+                    name = get_user_name(group_id, uid)
+                    msg_lines.append(f"第 {rank} 名: {name} ({count} 則訊息)")
                 reply_text = "\n".join(msg_lines)
 
         # 【指令 3：今日廢話王】
@@ -187,7 +207,8 @@ def handle_message(event):
             else:
                 msg_lines = [f"👑 今日廢話王排行榜 ({datetime.now().strftime('%Y-%m-%d')})："]
                 for rank, (uid, count) in enumerate(leaderboard, 1):
-                    msg_lines.append(f"第 {rank} 名: {uid[:6]}... ({count} 則發言)")
+                    name = get_user_name(group_id, uid)
+                    msg_lines.append(f"第 {rank} 名: {name} ({count} 則發言)")
                 reply_text = "\n".join(msg_lines)
 
         # 【指令 4：自訂天數廢話王 (例如：廢話王 7 / 廢話王 30天)】
@@ -200,7 +221,22 @@ def handle_message(event):
             else:
                 msg_lines = [f"👑 近 {days} 天廢話王排行榜："]
                 for rank, (uid, count) in enumerate(leaderboard, 1):
-                    msg_lines.append(f"第 {rank} 名: {uid[:6]}... ({count} 則發言)")
+                    name = get_user_name(group_id, uid)
+                    msg_lines.append(f"第 {rank} 名: {name} ({count} 則發言)")
+                reply_text = "\n".join(msg_lines)
+
+        # 【指令 5：自訂日期區間 (例如：廢話王 2026-08-01 2026-08-22)】
+        elif re.match(r"^廢話王\s*(\d{4}-\d{2}-\d{2})\s+(\d{4}-\d{2}-\d{2})$", user_text):
+            match_dates = re.match(r"^廢話王\s*(\d{4}-\d{2}-\d{2})\s+(\d{4}-\d{2}-\d{2})$", user_text)
+            s_date, e_date = match_dates.group(1), match_dates.group(2)
+            leaderboard = get_custom_leaderboard(group_id, start_date=s_date, end_date=e_date)
+            if not leaderboard:
+                reply_text = f"在 {s_date} 至 {e_date} 區間沒有對話紀錄喔！"
+            else:
+                msg_lines = [f"👑 廢話王排行榜 ({s_date} ~ {e_date})："]
+                for rank, (uid, count) in enumerate(leaderboard, 1):
+                    name = get_user_name(group_id, uid)
+                    msg_lines.append(f"第 {rank} 名: {name} ({count} 則發言)")
                 reply_text = "\n".join(msg_lines)
 
         # 【一般訊息：同時存入記憶體與 PostgreSQL 雲端資料庫】
