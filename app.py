@@ -524,8 +524,9 @@ def handle_message(event):
                 ask_prompt = f"你是一個樂於助人的 LINE 群組 AI 助手。請用簡明、親切且精準的繁體中文回答以下問題：\n\n{user_question}"
                 response = client.models.generate_content(model='gemini-3.5-flash', contents=ask_prompt)
                 reply_text = response.text
-            except Exception as ai_err:
-                reply_text = "抱歉，我現在有點轉不過來，請稍後再試一次！"
+                except Exception as ai_err:
+                print(f"Gemini API Error: {ai_err}", file=sys.stderr)
+                reply_text = f"抱歉，我現在有點轉不過來，請稍後再試一次！(錯誤：{ai_err})"
 
         # 15. 一般訊息：紀錄並忽略
         else:
