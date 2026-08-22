@@ -68,7 +68,7 @@ def handle_message(event):
                     
                     # 呼叫 Gemini 3.7 Flash 模型
                     response = client.models.generate_content(
-                        model='gemini-3.7-flash',
+                        model='gemini-3.5-flash',
                         contents=prompt
                     )
                     reply_text = response.text
