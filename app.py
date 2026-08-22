@@ -30,7 +30,7 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 # 初始化 Google GenAI Client
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 記憶體快取 (近 200 則訊息供「綺語」快速查詢)
+# 記憶體快取 (近 200 則訊息供「綺語」與「摘要」快速查詢)
 group_chat_history = {}
 
 # --- LINE API Profile 抓取真實暱稱 ---
@@ -152,7 +152,7 @@ def handle_message(event):
 
         reply_text = None
 
-        # 【指令 1：摘要 (可帶數字，例如「摘要 50」或「摘要」)】
+        # 【指令 1：摘要 (例如「摘要 50」或「摘要」)】
         match_summary = re.match(r"^摘要\s*(\d+)?$", user_text)
         if match_summary:
             limit = int(match_summary.group(1)) if match_summary.group(1) else 100
@@ -239,7 +239,27 @@ def handle_message(event):
                     msg_lines.append(f"第 {rank} 名: {name} ({count} 則發言)")
                 reply_text = "\n".join(msg_lines)
 
-        # 【一般訊息：同時存入記憶體與 PostgreSQL 雲端資料庫】
+        # 【功能 6：AI 智能問答 (使用 !問 或 @機器人 或 問：)】
+        elif re.match(r"^(!問|@機器人|問[:：])\s*(.+)$", user_text, re.DOTALL):
+            match_q = re.match(r"^(!問|@機器人|問[:：])\s*(.+)$", user_text, re.DOTALL)
+            user_question = match_q.group(2).strip()
+            
+            # 依舊將這條訊息存入歷史紀錄
+            group_chat_history[group_id].append({'user_id': user_id, 'text': user_text})
+            log_message_to_db(group_id, user_id, user_text)
+
+            try:
+                ask_prompt = f"你是一個樂於助人的 LINE 群組 AI 助手。請用簡明、親切且精準的繁體中文回答以下問題：\n\n{user_question}"
+                response = client.models.generate_content(
+                    model='gemini-3.5-flash',
+                    contents=ask_prompt
+                )
+                reply_text = response.text
+            except Exception as ai_err:
+                print(f"Gemini 問答失敗: {ai_err}", file=sys.stderr)
+                reply_text = "抱歉，我現在有點轉不過來，請稍後再試一次！"
+
+        # 【一般訊息：記錄並忽略】
         else:
             group_chat_history[group_id].append({'user_id': user_id, 'text': user_text})
             if len(group_chat_history[group_id]) > 200:
