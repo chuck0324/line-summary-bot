@@ -556,18 +556,21 @@ def handle_message(event):
                 del group_games[group_id]
         return
 
-    # 11. AI 智能對話與記憶（需包含 @、!問 或 私訊）
+    # 11. AI 智能對話與記憶（群組嚴格過濾：必須有 !問 或 @ 標記才會回應）
     is_group = (source_type == "group")
     is_cmd = user_text.startswith("!問") or user_text.startswith("!")
     is_at = "@" in user_text
 
     if is_group and not (is_cmd or is_at):
-        return  # 一般群組對話，僅背景紀錄不回答
+        return  # 一般群組對話，僅背景紀錄次數，不回話
 
     clean_msg = user_text
-    if clean_msg.startswith("!問"): clean_msg = clean_msg[3:].strip()
-    elif clean_msg.startswith("!"): clean_msg = clean_msg[1:].strip()
-    if not clean_msg: clean_msg = user_text
+    if clean_msg.startswith("!問"): 
+        clean_msg = clean_msg[3:].strip()
+    elif clean_msg.startswith("!"): 
+        clean_msg = clean_msg[1:].strip()
+    if not clean_msg: 
+        clean_msg = user_text
 
     user_name = get_user_name(group_id, user_id)
     reply_text = generate_ai_response(group_id, user_id, user_name, clean_msg)
