@@ -322,11 +322,12 @@ def handle_message(event):
         reply_text = None
 
         # 0. 說明選單 (Help)
-        if user_text in ["!help", "help", "說明", "指令"]:
+        if user_text in ["!help", "！help", "help", "說明", "指令"]:
             reply_text = """🤖 【群組小幫手使用說明】
+(全形『！』或半形『!』皆可觸發)
 
 🤖 AI 問答與對話整理
-• `!問 [問題]`：向 Gemini 發問 (例如: !問 台北明天天氣)
+• `!問 [問題]` 或 `!q [問題]`：向 Gemini 發問
 • `摘要` 或 `摘要 50`：自動分類並整理近期對話重點與待辦
 
 👑 排行榜與歷史搜尋
@@ -414,8 +415,8 @@ def handle_message(event):
                 reply_text = "\n".join(msg_lines)
 
         # 6. 分帳助手 - 記帳
-        elif re.match(r"^!記帳\s+(\S+)\s+(\d+(\.\d+)?)\s+(.+)$", user_text):
-            m = re.match(r"^!記帳\s+(\S+)\s+(\d+(\.\d+)?)\s+(.+)$", user_text)
+        elif re.match(r"^[!！]記帳\s+(\S+)\s+(\d+(\.\d+)?)\s+(.+)$", user_text):
+            m = re.match(r"^[!！]記帳\s+(\S+)\s+(\d+(\.\d+)?)\s+(.+)$", user_text)
             p_name, amt, item = m.group(1), float(m.group(2)), m.group(4)
             if add_expense(group_id, p_name, amt, item):
                 reply_text = f"✅ 已記錄：{p_name} 付了 ${amt:.0f} ({item})"
@@ -423,22 +424,22 @@ def handle_message(event):
                 reply_text = "記帳失敗，請稍後再試。"
 
         # 7. 分帳助手 - 算帳
-        elif user_text in ["!算帳", "!結帳"]:
+        elif user_text in ["!算帳", "！算帳", "!結帳", "！結帳"]:
             reply_text = calculate_expenses(group_id)
 
         # 8. 分帳助手 - 清空帳目
-        elif user_text == "!清空帳目":
+        elif user_text in ["!清空帳目", "！清空帳目"]:
             if clear_expenses(group_id):
                 reply_text = "🗑️ 群組帳務資料已全部清空！"
 
         # 9. 美食抽籤 - 新增餐廳
-        elif re.match(r"^!新增餐廳\s+(.+)$", user_text):
-            r_name = re.match(r"^!新增餐廳\s+(.+)$", user_text).group(1).strip()
+        elif re.match(r"^[!！]新增餐廳\s+(.+)$", user_text):
+            r_name = re.match(r"^[!！]新增餐廳\s+(.+)$", user_text).group(1).strip()
             if add_restaurant(group_id, r_name):
                 reply_text = f"🍱 已新增餐廳：「{r_name}」到口袋名單！"
 
         # 10. 美食抽籤 - 抽午餐
-        elif user_text in ["!吃什麼", "吃什麼", "抽午餐"]:
+        elif user_text in ["!吃什麼", "！吃什麼", "吃什麼", "抽午餐"]:
             chosen = pick_restaurant(group_id)
             if not chosen:
                 reply_text = "口袋名單是空的！請先用 `!新增餐廳 [名稱]` 來新增吧！"
@@ -451,8 +452,8 @@ def handle_message(event):
                     reply_text = f"🎲 今天的命定美食是：【{chosen}】！"
 
         # 11. 黑歷史成語產生器
-        elif re.match(r"^!黑歷史(\s+.*)?$", user_text):
-            m_target = re.match(r"^!黑歷史(\s+.*)?$", user_text).group(1)
+        elif re.match(r"^[!！]黑歷史(\s+.*)?$", user_text):
+            m_target = re.match(r"^[!！]黑歷史(\s+.*)?$", user_text).group(1)
             target_name = m_target.strip() if m_target else get_user_name(group_id, user_id)
             
             try:
@@ -477,7 +478,7 @@ def handle_message(event):
                 reply_text = f"生成黑歷史成語失敗：{e}"
 
         # 12. 默契大考驗 - 出題
-        elif user_text == "!出題":
+        elif user_text in ["!出題", "！出題"]:
             prompt = "請設計一題超爆笑、具爭議性或令人糾結的「二選一情境選擇題」（例如：一輩子不洗澡 vs 一輩子不刷牙）。請給出題目與 A、B 兩個選項。"
             try:
                 res = client.models.generate_content(model='gemini-3.5-flash', contents=prompt)
@@ -487,8 +488,8 @@ def handle_message(event):
                 reply_text = f"出題失敗：{e}"
 
         # 13. 默契大考驗 - 回答
-        elif re.match(r"^!回答\s+(.+)$", user_text):
-            ans = re.match(r"^!回答\s+(.+)$", user_text).group(1).strip()
+        elif re.match(r"^[!！]回答\s+(.+)$", user_text):
+            ans = re.match(r"^[!！]回答\s+(.+)$", user_text).group(1).strip()
             if group_id not in group_games or 'question' not in group_games[group_id]:
                 reply_text = "目前沒有進行中的題目，請先輸入 `!出題` 喔！"
             else:
@@ -511,9 +512,11 @@ def handle_message(event):
                     except Exception as e:
                         reply_text = f"結算失敗：{e}"
 
-        # 14. AI 智能問答
-        elif re.match(r"^(!問|@機器人|問[:：])\s*(.+)$", user_text, re.DOTALL):
-            user_question = re.match(r"^(!問|@機器人|問[:：])\s*(.+)$", user_text, re.DOTALL).group(2).strip()
+        # 14. AI 智能問答（僅限 !問, ！問, !q, ！q）
+        elif re.match(r"^(!問|！問|!q|！q)[:：\s]*(.+)$", user_text, re.IGNORECASE | re.DOTALL):
+            m = re.match(r"^(!問|！問|!q|！q)[:：\s]*(.+)$", user_text, re.IGNORECASE | re.DOTALL)
+            user_question = m.group(2).strip()
+            
             group_chat_history[group_id].append({'user_id': user_id, 'text': user_text})
             log_message_to_db(group_id, user_id, user_text)
 
