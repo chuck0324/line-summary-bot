@@ -3,6 +3,7 @@ import sys
 import re
 import random
 import threading
+import time
 import psycopg2
 from datetime import datetime
 from collections import Counter
@@ -18,6 +19,7 @@ from linebot.v3.messaging import (
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 from google import genai
+from google.genai.errors import ServerError
 
 app = Flask(__name__)
 
@@ -107,6 +109,25 @@ def get_user_profile_by_name(user_name):
         print(f"[DB Error] 依姓名讀取 Profile 失敗: {e}")
     return None
 
+# ==================== 穩健的 AI 呼叫封裝（含 503 自動重試） ====================
+def safe_generate_content(contents, retries=3, delay=2):
+    """專門呼叫 gemini-3.6-flash，遇 503 過載會自動重試"""
+    for attempt in range(retries):
+        try:
+            return ai_client.models.generate_content(
+                model="gemini-3.6-flash",
+                contents=contents
+            )
+        except ServerError as e:
+            print(f"[AI 503 Warning] 伺服器忙碌中，正在進行第 {attempt + 1} 次重試... 錯誤: {e}")
+            if attempt < retries - 1:
+                time.sleep(delay)
+            else:
+                raise e
+        except Exception as e:
+            print(f"[AI Error] {e}")
+            raise e
+
 def update_user_profile_async(sender_id, sender_name, user_msg, bot_reply):
     """記憶庫非同步分類與更新"""
     def task():
@@ -129,10 +150,7 @@ TARGET_NAME: 目標姓名
 TYPE: [SELF 或 OTHERS]
 FEATURE: 提煉出的特徵重點
 """
-            response = ai_client.models.generate_content(
-                model="gemini-3.6-flash",
-                contents=prompt
-            )
+            response = safe_generate_content(contents=prompt)
             result_text = response.text.strip()
 
             target_name = sender_name
@@ -185,7 +203,7 @@ FEATURE: 提煉出的特徵重點
             cur.close()
             conn.close()
         except Exception as e:
-            print(f"[Memory Error] {e}")
+            print(f"[Memory Async Error] {e}")
 
     threading.Thread(target=task).start()
 
@@ -350,13 +368,17 @@ def generate_ai_response(chat_id, user_id, user_name, user_msg):
 """
 
     prompt = f"成員【{user_name}】說：{user_msg}"
-    response = ai_client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=[system_instruction, prompt]
-    )
-    bot_reply = response.text.strip()
-    update_user_profile_async(user_id, user_name, user_msg, bot_reply)
-    return bot_reply
+    
+    try:
+        response = safe_generate_content(contents=[system_instruction, prompt])
+        bot_reply = response.text.strip()
+        update_user_profile_async(user_id, user_name, user_msg, bot_reply)
+        return bot_reply
+    except ServerError:
+        return "😅 AI 伺服器目前流量過大正在塞車（503），請稍後再試一次！"
+    except Exception as e:
+        print(f"[AI Gen Error] {e}")
+        return "⚠️ 系統發生了一點小狀況，請稍後再試！"
 
 # ==================== Flask Webhook 路由 ====================
 @app.route("/", methods=['GET'])
@@ -407,20 +429,20 @@ def handle_message(event):
     group_chat_history[group_id].append({'user_id': user_id, 'text': user_text})
     if len(group_chat_history[group_id]) > 200: group_chat_history[group_id].pop(0)
 
-    # 2. 說明選單 (!help)
-    if user_text in ["!help", "！help", "help", "說明", "指令"]:
+    # 2. 說明選單 (!help / ！help)
+    if user_text in ["!help", "！help", "!說明", "！說明", "!指令", "！指令", "help", "說明", "指令"]:
         help_text = (
             "🤖 【群組小幫手全功能選單】\n\n"
             "🤖 AI 問答與對話整理：\n"
-            "• `!問 [問題]` 或 `@機器人 [問題]`：AI 互動\n"
+            "• `!問 [問題]` 或 `！問 [問題]` 或 `@機器人 [問題]`：AI 互動\n"
             "• `摘要` 或 `摘要 50`：整理近期對話重點與待辦\n\n"
             "👑 排行榜與歷史搜尋：\n"
             "• `今日廢話王` / `@Bot 廢話王`：查看今天發言王\n"
             "• `廢話王 7`：查看近 7 天發言排行榜\n"
             "• `搜尋 [關鍵字]`：搜尋歷史發言紀錄\n\n"
             "🎭 模式切換：\n"
-            "• `!廢話王` - 切換為乾話吐嘈模式\n"
-            "• `!標準` - 切換為標準貼心小幫手\n\n"
+            "• `!廢話王` / `！廢話王` - 切換為乾話吐嘈模式\n"
+            "• `!標準` / `！標準` - 切換為標準貼心小幫手\n\n"
             "🍱 美食抽籤：`!新增餐廳 [名稱]` / `!吃什麼` / `抽午餐`\n"
             "💰 群組記帳：`!記帳 [名字] [金額] [品項]` / `!算帳` / `!清空帳目`\n"
             "🎮 互動遊戲：`!黑歷史` / `!出題` / `!回答 [A/B]`"
@@ -428,12 +450,12 @@ def handle_message(event):
         reply_to_line(event.reply_token, help_text)
         return
 
-    # 3. 模式切換
-    if user_text == "!廢話王":
+    # 3. 模式切換 (!廢話王 / ！廢話王)
+    if user_text in ["!廢話王", "！廢話王"]:
         USER_MODES[group_id] = "trashtalk"
         reply_to_line(event.reply_token, "🤪 廢話王模式已啟動！準備好被我吐嘈了嗎？")
         return
-    elif user_text == "!標準":
+    elif user_text in ["!標準", "！標準"]:
         USER_MODES[group_id] = "standard"
         reply_to_line(event.reply_token, "🤖 已切換回標準貼心小幫手模式！")
         return
@@ -443,8 +465,11 @@ def handle_message(event):
         limit = int(re.match(r"^摘要\s*(\d+)?$", user_text).group(1) or 100)
         logs = [f"[{get_user_name(group_id, m['user_id'])}]: {m['text']}" for m in group_chat_history[group_id][-limit:]]
         prompt = f"你是一個高效率的群組對話整理助手。請分類並整理重點與待辦：\n\n" + "\n".join(logs)
-        res = ai_client.models.generate_content(model="gemini-3.6-flash", contents=prompt)
-        reply_to_line(event.reply_token, res.text)
+        try:
+            res = safe_generate_content(contents=prompt)
+            reply_to_line(event.reply_token, res.text)
+        except Exception:
+            reply_to_line(event.reply_token, "😅 摘要生成失敗，AI 伺服器忙碌中（503），請稍後再試！")
         return
 
     # 5. 廢話王排行榜
@@ -484,7 +509,7 @@ def handle_message(event):
             reply_to_line(event.reply_token, "\n".join(msg_lines))
         return
 
-    # 7. 分帳助手
+    # 7. 分帳助手 (!記帳 / ！記帳)
     if re.match(r"^[!！]記帳\s+(\S+)\s+(\d+(\.\d+)?)\s+(.+)$", user_text):
         m = re.match(r"^[!！]記帳\s+(\S+)\s+(\d+(\.\d+)?)\s+(.+)$", user_text)
         if add_expense(group_id, m.group(1), float(m.group(2)), m.group(4)):
@@ -497,7 +522,7 @@ def handle_message(event):
         if clear_expenses(group_id): reply_to_line(event.reply_token, "🗑️ 群組帳務資料已全部清空！")
         return
 
-    # 8. 美食抽籤
+    # 8. 美食抽籤 (!新增餐廳 / ！新增餐廳)
     if re.match(r"^[!！]新增餐廳\s+(.+)$", user_text):
         r_name = re.match(r"^[!！]新增餐廳\s+(.+)$", user_text).group(1).strip()
         if add_restaurant(group_id, r_name): reply_to_line(event.reply_token, f"🍱 已新增餐廳：「{r_name}」到口袋名單！")
@@ -508,11 +533,14 @@ def handle_message(event):
             reply_to_line(event.reply_token, "口袋名單是空的！請先用 `!新增餐廳 [名稱]` 新增吧！")
         else:
             prompt = f"用極度幽默的方式兩句話介紹「{chosen}」當今天午餐或晚餐選擇。"
-            res = ai_client.models.generate_content(model="gemini-3.6-flash", contents=prompt)
-            reply_to_line(event.reply_token, f"🎲 今天的命定美食是：【{chosen}】！\n\n💡 {res.text}")
+            try:
+                res = safe_generate_content(contents=prompt)
+                reply_to_line(event.reply_token, f"🎲 今天的命定美食是：【{chosen}】！\n\n💡 {res.text}")
+            except Exception:
+                reply_to_line(event.reply_token, f"🎲 今天的命定美食是：【{chosen}】！\n（AI 忙碌中，先讓你選這一家！）")
         return
 
-    # 9. 黑歷史成語
+    # 9. 黑歷史成語 (!黑歷史 / ！黑歷史)
     if re.match(r"^[!！]黑歷史(\s+.*)?$", user_text):
         m_target = re.match(r"^[!！]黑歷史(\s+.*)?$", user_text).group(1)
         target_name = m_target.strip() if m_target else get_user_name(group_id, user_id)
@@ -527,16 +555,22 @@ def handle_message(event):
         else:
             quotes = "\n".join([f"- {r[0]}" for r in rows])
             prompt = f"請根據以下歷史發言為「{target_name}」創立一個全新的【四字成語】，給出漢語拼音、釋義與典故：\n{quotes}"
-            res = ai_client.models.generate_content(model="gemini-3.6-flash", contents=prompt)
-            reply_to_line(event.reply_token, f"📜 【{target_name} 專屬黑歷史成語】\n\n{res.text}")
+            try:
+                res = safe_generate_content(contents=prompt)
+                reply_to_line(event.reply_token, f"📜 【{target_name} 專屬黑歷史成語】\n\n{res.text}")
+            except Exception:
+                reply_to_line(event.reply_token, "😅 AI 伺服器忙碌中（503），黑歷史成語產出失敗，請稍後再試！")
         return
 
-    # 10. 默契大考驗
+    # 10. 默契大考驗 (!出題 / ！出題)
     if user_text in ["!出題", "！出題"]:
         prompt = "請設計一題爆笑且具爭議性的「二選一情境選擇題」，給出題目與 A、B 選項。"
-        res = ai_client.models.generate_content(model="gemini-3.6-flash", contents=prompt)
-        group_games[group_id] = {'question': res.text, 'answers': {}}
-        reply_to_line(event.reply_token, f"🎮 【默契大考驗】題目來了！\n\n{res.text}\n\n👉 請輸入 `!回答 A` 或 `!回答 B`！")
+        try:
+            res = safe_generate_content(contents=prompt)
+            group_games[group_id] = {'question': res.text, 'answers': {}}
+            reply_to_line(event.reply_token, f"🎮 【默契大考驗】題目來了！\n\n{res.text}\n\n👉 請輸入 `!回答 A` 或 `！回答 B`！")
+        except Exception:
+            reply_to_line(event.reply_token, "😅 AI 伺服器忙碌中（503），出題失敗，請稍後再試！")
         return
     elif re.match(r"^[!！]回答\s+(.+)$", user_text):
         ans = re.match(r"^[!！]回答\s+(.+)$", user_text).group(1).strip()
@@ -550,25 +584,38 @@ def handle_message(event):
                 reply_to_line(event.reply_token, f"✅ {u_name} 已選擇【{ans}】！還需要至少 1 位成員輸入 `!回答`！")
             else:
                 ans_summary = "\n".join([f"• {k}: {v}" for k, v in ans_dict.items()])
-                prompt = f"評定以下默契指數 (0%~100%) 並講評：\n{ans_summary}"
-                res = ai_client.models.generate_content(model="gemini-3.6-flash", contents=prompt)
-                reply_to_line(event.reply_token, f"🎯 【默契結算】\n\n成員選擇：\n{ans_summary}\n\n🤖 裁判講評：\n{res.text}")
+                prompt = f"評定以下默契指數 (0%~100%) 與講評：\n{ans_summary}"
+                try:
+                    res = safe_generate_content(contents=prompt)
+                    reply_to_line(event.reply_token, f"🎯 【默契結算】\n\n成員選擇：\n{ans_summary}\n\n🤖 裁判講評：\n{res.text}")
+                except Exception:
+                    reply_to_line(event.reply_token, f"🎯 【默契結算】\n\n成員選擇：\n{ans_summary}\n\n（AI 忙碌中，你們這群人的默契自己心裡有數啦！）")
                 del group_games[group_id]
         return
 
-    # 11. AI 智能對話與記憶（群組嚴格過濾：必須有 !問 或 @ 標記才會回應）
+    # 11. AI 智能對話與記憶（群組嚴格過濾：必須有 !問/！問 或 提及機器人mention 才會回應）
     is_group = (source_type == "group")
-    is_cmd = user_text.startswith("!問") or user_text.startswith("!")
-    is_at = "@" in user_text
+    
+    # 檢查是否包含指令（支援半形 ! 與全形 ！）：如 !問 或 ！問
+    is_cmd = user_text.startswith("!問") or user_text.startswith("！問") or user_text.startswith("!") or user_text.startswith("！")
 
-    if is_group and not (is_cmd or is_at):
-        return  # 一般群組對話，僅背景紀錄次數，不回話
+    # 檢查是否真的在 LINE 中透過 @ 標記了機器人本身（透過 message.mention 結構，避免誤判一般人的 @user）
+    is_mentioned = False
+    if hasattr(event.message, 'mention') and event.message.mention:
+        # 可以檢查 mention 中是否有機器人自己的 ID，或者直接判定有 mention 且包含 bot
+        is_mentioned = True  
+
+    # 如果在群組裡，且既不是指令（! / ！），也沒有 @ 機器人，就直接 return 不回話
+    if is_group and not (is_cmd or is_mentioned):
+        return  
 
     clean_msg = user_text
-    if clean_msg.startswith("!問"): 
-        clean_msg = clean_msg[3:].strip()
-    elif clean_msg.startswith("!"): 
+    # 移除前綴的 !問 / ！問 / ! / ！
+    if clean_msg.startswith("!問") or clean_msg.startswith("！問"): 
+        clean_msg = clean_msg[2:].strip()
+    elif clean_msg.startswith("!") or clean_msg.startswith("！"): 
         clean_msg = clean_msg[1:].strip()
+    
     if not clean_msg: 
         clean_msg = user_text
 
