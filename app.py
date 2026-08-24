@@ -46,7 +46,7 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 # 初始化 Google Gemini Client
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 暫存狀態 (模式與遊戲)
+# 暫存狀態 (模式、模仿人格與遊戲)
 USER_MODES = {}
 group_chat_history = {}
 group_games = {}
@@ -93,18 +93,25 @@ def get_user_profile(user_id):
     return {"name": "成員", "self_desc": "無", "others_opinion": "無", "summary": "尚無紀錄"}
 
 def get_user_profile_by_name(user_name):
+    """依名稱模糊比對讀取使用者特徵資料"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
-            SELECT user_id, self_description, others_opinion 
-            FROM user_profiles WHERE user_name = %s;
-        """, (user_name,))
+            SELECT user_id, user_name, self_description, others_opinion, profile_summary 
+            FROM user_profiles WHERE user_name ILIKE %s LIMIT 1;
+        """, (f"%{user_name}%",))
         row = cur.fetchone()
         cur.close()
         conn.close()
         if row:
-            return {"user_id": row[0], "self_desc": row[1] or "", "others_opinion": row[2] or ""}
+            return {
+                "user_id": row[0],
+                "user_name": row[1],
+                "self_desc": row[2] or "無",
+                "others_opinion": row[3] or "無",
+                "summary": row[4] or "尚無紀錄"
+            }
     except Exception as e:
         print(f"[DB Error] 依姓名讀取 Profile 失敗: {e}")
     return None
@@ -345,26 +352,33 @@ def pick_restaurant(group_id):
 # ==================== Gemini AI 生成邏輯 ====================
 def generate_ai_response(chat_id, user_id, user_name, user_msg):
     profile = get_user_profile(user_id)
-    mode = USER_MODES.get(chat_id, "standard")
+    mode_setting = USER_MODES.get(chat_id, "standard")
 
-    if mode == "trashtalk":
+    # 判斷是否為「模仿模式」或「動態指令模式」
+    if isinstance(mode_setting, dict) and mode_setting.get("type") == "impersonate":
+        system_instruction = mode_setting["prompt"]
+    elif mode_setting == "trashtalk":
+        # 收斂後的廢話王風格：簡短、微吐槽、講重點，不浮誇
         system_instruction = f"""
-你現在是群組裡的「廢話王」！
-風格：極度幽默、喜歡開玩笑、吐嘈、講乾話、說廢話，口吻非常在地與隨性。
+你現在是群組裡的幽默助手。
+說話原則：
+1. 帶點微吐槽與在地隨性口吻，但講話必須簡短（1-3句內），絕不講冗長廢話。
+2. 講重點、直奔主題。
 你正在和【{user_name}】對話。
 
-【關於 {user_name} 的背景紀錄】：
-- 他自己的介紹：{profile['self_desc']}
-- 其他朋友對他的評價/爆料：{profile['others_opinion']}
+【關於 {user_name} 的背景】：
+- 自我介紹：{profile['self_desc']}
+- 朋友評價：{profile['others_opinion']}
 """
     else:
         system_instruction = f"""
-你是一個活潑、在地且貼心的 LINE 群組機器人助手。
-你現在正在和成員【{user_name}】對話。
+你是一個簡潔、貼心且講重點的 LINE 群組助手。
+說話原則：簡明扼要、回答長度控制在 1-3 句話內，不說客套廢話。
+你正在和成員【{user_name}】對話。
 
 【關於 {user_name} 的長期紀錄】：
-- 他自己的介紹：{profile['self_desc']}
-- 其他朋友對他的評價/描述：{profile['others_opinion']}
+- 自我介紹：{profile['self_desc']}
+- 朋友評價：{profile['others_opinion']}
 """
 
     prompt = f"成員【{user_name}】說：{user_msg}"
@@ -434,30 +448,73 @@ def handle_message(event):
         help_text = (
             "🤖 【群組小幫手全功能選單】\n\n"
             "🤖 AI 問答與對話整理：\n"
-            "• `!問 [問題]` 或 `！問 [問題]` 或 `@機器人 [問題]`：AI 互動\n"
-            "• `摘要` 或 `摘要 50`：整理近期對話重點與待辦\n\n"
+            "• `!問 [問題]` 或 `@機器人 [問題]`：AI 互動\n"
+            "• `摘要` 或 `摘要 50`：整理近期對話重點\n\n"
+            "🎭 模式與模仿切換：\n"
+            "• `!模仿 [名字]`：讓 AI 完全扮演資料庫中的成員\n"
+            "• `!恢復` / `!標準`：恢復為標準助手\n"
+            "• `!廢話王`：切換為幽默吐槽模式\n\n"
             "👑 排行榜與歷史搜尋：\n"
-            "• `今日廢話王` / `@Bot 廢話王`：查看今天發言王\n"
-            "• `廢話王 7`：查看近 7 天發言排行榜\n"
-            "• `搜尋 [關鍵字]`：搜尋歷史發言紀錄\n\n"
-            "🎭 模式切換：\n"
-            "• `!廢話王` / `！廢話王` - 切換為乾話吐嘈模式\n"
-            "• `!標準` / `！標準` - 切換為標準貼心小幫手\n\n"
-            "🍱 美食抽籤：`!新增餐廳 [名稱]` / `!吃什麼` / `抽午餐`\n"
+            "• `今日廢話王` / `廢話王 7`：發言排行榜\n"
+            "• `搜尋 [關鍵字]`：搜尋歷史發言\n\n"
+            "🍱 美食抽籤：`!新增餐廳 [名稱]` / `!吃什麼`\n"
             "💰 群組記帳：`!記帳 [名字] [金額] [品項]` / `!算帳` / `!清空帳目`\n"
             "🎮 互動遊戲：`!黑歷史` / `!出題` / `!回答 [A/B]`"
         )
         reply_to_line(event.reply_token, help_text)
         return
 
-    # 3. 模式切換 (!廢話王 / ！廢話王)
-    if user_text in ["!廢話王", "！廢話王"]:
-        USER_MODES[group_id] = "trashtalk"
-        reply_to_line(event.reply_token, "🤪 廢話王模式已啟動！準備好被我吐嘈了嗎？")
+    # 3. 模式切換與模仿 (!模仿 / !廢話王 / !標準 / !恢復)
+    if user_text.startswith("!模仿") or user_text.startswith("！模仿"):
+        target_name = user_text[3:].strip()
+        if not target_name:
+            reply_to_line(event.reply_token, "請指定要模仿的人，例如：`!模仿 小明`")
+            return
+        
+        target_profile = get_user_profile_by_name(target_name)
+        if not target_profile:
+            reply_to_line(event.reply_token, f"😅 資料庫裡找不到與「{target_name}」相關的特徵紀錄喔！")
+            return
+
+        real_name = target_profile["user_name"]
+        
+        # 組裝動態模仿 Prompt
+        impersonate_prompt = f"""
+你現在要完全扮演群組成員「{real_name}」。
+根據資料庫記錄，他的個性與說話風格如下：
+- 自我陳述：{target_profile['self_desc']}
+- 朋友評價：{target_profile['others_opinion']}
+- 綜合特徵：{target_profile['summary']}
+
+請遵循原則：
+1. 用他的口吻、習慣用語與邏輯回答問題。
+2. 回答保持簡短自然（1-3 句話內），像本人在 LINE 打字。
+3. 絕不要使用官腔或機器人式的用語。
+"""
+        USER_MODES[group_id] = {
+            "type": "impersonate",
+            "target": real_name,
+            "prompt": impersonate_prompt
+        }
+
+        # 登場台詞
+        try:
+            res = safe_generate_content(contents=[impersonate_prompt, "用你本人的風格跟大家打個招呼並說一句話！"])
+            intro_msg = res.text.strip()
+        except Exception:
+            intro_msg = f"大家好，我是 {real_name}！"
+
+        reply_to_line(event.reply_token, f"🎭 【已切換為 {real_name} 模式】\n\n{intro_msg}")
         return
-    elif user_text in ["!標準", "！標準"]:
+
+    elif user_text in ["!廢話王", "！廢話王"]:
+        USER_MODES[group_id] = "trashtalk"
+        reply_to_line(event.reply_token, "🤪 已切換為幽默吐槽模式！講重點不廢話。")
+        return
+
+    elif user_text in ["!標準", "！標準", "!恢復", "！恢復", "!重置", "！重置"]:
         USER_MODES[group_id] = "standard"
-        reply_to_line(event.reply_token, "🤖 已切換回標準貼心小幫手模式！")
+        reply_to_line(event.reply_token, "🤖 已恢復為標準貼心小幫手模式！")
         return
 
     # 4. 對話摘要
@@ -532,7 +589,7 @@ def handle_message(event):
         if not chosen:
             reply_to_line(event.reply_token, "口袋名單是空的！請先用 `!新增餐廳 [名稱]` 新增吧！")
         else:
-            prompt = f"用極度幽默的方式兩句話介紹「{chosen}」當今天午餐或晚餐選擇。"
+            prompt = f"用幽默方式兩句話介紹「{chosen}」當今天午餐或晚餐選擇。"
             try:
                 res = safe_generate_content(contents=prompt)
                 reply_to_line(event.reply_token, f"🎲 今天的命定美食是：【{chosen}】！\n\n💡 {res.text}")
@@ -593,24 +650,18 @@ def handle_message(event):
                 del group_games[group_id]
         return
 
-    # 11. AI 智能對話與記憶（群組嚴格過濾：必須有 !問/！問 或 提及機器人mention 才會回應）
+    # 11. AI 智能對話與記憶（群組過濾：必須有 !問/！問 或 提及機器人mention 才會回應）
     is_group = (source_type == "group")
-    
-    # 檢查是否包含指令（支援半形 ! 與全形 ！）：如 !問 或 ！問
     is_cmd = user_text.startswith("!問") or user_text.startswith("！問") or user_text.startswith("!") or user_text.startswith("！")
 
-    # 檢查是否真的在 LINE 中透過 @ 標記了機器人本身（透過 message.mention 結構，避免誤判一般人的 @user）
     is_mentioned = False
     if hasattr(event.message, 'mention') and event.message.mention:
-        # 可以檢查 mention 中是否有機器人自己的 ID，或者直接判定有 mention 且包含 bot
         is_mentioned = True  
 
-    # 如果在群組裡，且既不是指令（! / ！），也沒有 @ 機器人，就直接 return 不回話
     if is_group and not (is_cmd or is_mentioned):
         return  
 
     clean_msg = user_text
-    # 移除前綴的 !問 / ！問 / ! / ！
     if clean_msg.startswith("!問") or clean_msg.startswith("！問"): 
         clean_msg = clean_msg[2:].strip()
     elif clean_msg.startswith("!") or clean_msg.startswith("！"): 
