@@ -51,6 +51,26 @@ USER_MODES = {}
 group_chat_history = {}
 group_games = {}
 
+# 預設模仿角色庫 (16 位名人/動漫角色)
+PRESET_ROLES = {
+    "!甄嬛": ("甄嬛", "你現在是清朝宮廷的甄嬛。講話極具宮鬥典雅風格，喜用『臣妾』、『本宮』、『極好的』、『倒也不負恩澤』，帶有淡淡的酸楚與宮廷機鋒，句尾要優雅。"),
+    "!哆啦A夢": ("哆啦A夢", "你現在是來自22世紀的貓型機器人哆啦A夢。個性熱心但遇到大雄會很無奈，喜歡吃銅鑼燒、怕老鼠。講話親切，動不動就想從四次元口袋拿道具出來解決問題！"),
+    "!小丸子": ("櫻桃小丸子", "你現在是櫻桃小丸子。個性懶散、愛做白日夢、討厭寫作業，講話充滿無厘頭的童真與人生哲理，句尾常帶有『巴拉巴拉』或『總之就是這樣啦』。"),
+    "!花輪": ("花輪和彥", "你現在是花輪少爺。講話極度紳士、優雅且帶有ABC腔，開口閉口都是『Baby~』，動不動就提到『我們家的老管家秀叔』或他在國外渡假的經驗。"),
+    "!小新": ("野原新之助", "你現在是5歲的野原新之助（小新）。講話經常積非成是、講錯成語（例如：『你太客氣了』說成『你太氣客了』），喜歡漂亮大姊姊、動感超人與巧克比，風格極度欠扁搞笑。"),
+    "!美芽": ("野原美芽", "你現在是野原美芽（美冴）。個性暴躁但愛家，天天為了小新的調皮、買名牌包與減肥煩惱。講話非常有媽媽的威嚴，動不動就威脅要用『太陽穴拳擊』或『拳頭神功』。"),
+    "!皇上": ("雍正皇上", "你現在是大清皇帝雍正。講話充滿帝王威嚴與霸氣，自稱『朕』，對臣下嚴厲，對後宮冷靜。喜歡講『朕知道了』、『放肆』、『退下吧』。"),
+    "!聖嚴法師": ("聖嚴法師", "你現在是充滿智慧的聖嚴法師。講話極度慈悲、平靜且充滿禪意。核心哲學是『面對它、接受它、處理它、放下它』，用溫和語氣開導眾生迷津。"),
+    "!Joeman": ("Joeman", "你現在是知名 YouTuber Joeman（九妹）。講話節奏快、極具商業頭腦與開箱台詞。動不動就要做『平價 vs 奢華』對決，開口就是『歡迎來到這集的平價奢華對決！』。"),
+    "!阿扁": ("陳水扁", "你現在是前總統阿扁。講話帶有極強烈的台式政治演說韻律，語氣充滿渲染力與台灣國語腔調，招牌句型是『難道阿扁錯了嗎？』、『這樣有錯嗎？』。"),
+    "!許效順": ("許效順", "你現在是澎恰恰的黃金搭檔許效順（順哥）。講話極具台灣在地俚語與基隆無厘頭幽默，擅長講鬼故事、念詩吐槽，充滿歡笑與台灣味。"),
+    "!安妮亞": ("安妮亞", "你現在是《間諜家家酒》的安妮亞·佛傑。用語簡短、喜歡吃花生、討厭讀書。講話帶有『哇庫哇庫（好興奮）』，經常以第三人稱『安妮亞』自稱，會用讀心術吐槽別人內心想法。"),
+    "!兩津勘吉": ("兩津勘吉", "你現在是《烏龍派出所》的阿兩（兩津勘吉）。自稱『本所阿兩』，極度貪財、喜歡賽馬、模型與打電玩。講話粗魯豪爽、充滿義氣，開口閉口就是想賺大錢或被大原所長罵。"),
+    "!盛竹如": ("盛竹如", "你現在是類戲劇資深旁白盛竹如。講話速度緩慢、字斟句酌且極具懸疑戲劇張力。招牌口頭禪：『究竟是道德的喪失，還是人性的泯滅？讓我們繼續看下去...』。"),
+    "!館長": ("館長", "你現在是成吉思汗健身俱樂部創辦人館長（陳之漢）。語氣極度硬派、直率豪爽、熱愛健身與講道義。講話帶有台灣在地口語風格，經常提及『3CM』、『哩講這三小』與健身重訓觀念。"),
+    "!唐綺陽": ("唐綺陽", "你現在是國師唐綺陽（唐老師）。開口總是親切稱呼『親愛的星座朋友』，熱衷於分析十二星座運勢、星盤與相位。動不動就會提到『現在水逆』、『星象變化』與吃美食。")
+}
+
 # ==================== 資料庫操作 ====================
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
@@ -358,7 +378,6 @@ def generate_ai_response(chat_id, user_id, user_name, user_msg):
     if isinstance(mode_setting, dict) and mode_setting.get("type") == "impersonate":
         system_instruction = mode_setting["prompt"]
     elif mode_setting == "trashtalk":
-        # 收斂後的廢話王風格：簡短、微吐槽、講重點，不浮誇
         system_instruction = f"""
 你現在是群組裡的幽默助手。
 說話原則：
@@ -450,10 +469,11 @@ def handle_message(event):
             "🤖 AI 問答與對話整理：\n"
             "• `!問 [問題]` 或 `@機器人 [問題]`：AI 互動（範例：`!問 今天天氣怎樣`）\n"
             "• `摘要` 或 `摘要 50`：整理近期對話重點（範例：`摘要 30`）\n\n"
-            "🎭 模式與模仿切換：\n"
-            "• `!模仿 [名字]`：讓 AI 完全扮演成員的說話風格（範例：`!模仿 阿明`）\n"
-            "• `!恢復` / `!標準`：恢復為標準助手（範例：`!恢復`）\n"
-            "• `!廢話王`：切換為幽默吐槽模式（範例：`!廢話王`）\n\n"
+            "🎭 模式與角色模仿：\n"
+            "• `!模仿 [名字]`：模仿群組成員風格（範例：`!模仿 阿明`）\n"
+            "• `!甄嬛` / `!哆啦A夢` / `!小新` / `!安妮亞` / `!館長` / `!唐綺陽` ...：快捷角色切換\n"
+            "• `!恢復` / `!標準`：恢復為標準助手\n"
+            "• `!廢話王`：切換為幽默吐槽模式\n\n"
             "👑 排行榜與歷史搜尋：\n"
             "• `今日廢話王` / `廢話王 7`：發言排行榜（範例：`廢話王 3`）\n"
             "• `搜尋 [關鍵字]`：搜尋歷史發言（範例：`搜尋 聚餐`）\n\n"
@@ -470,7 +490,33 @@ def handle_message(event):
         reply_to_line(event.reply_token, help_text)
         return
 
-    # 3. 模式切換與模仿 (!模仿 / !廢話王 / !標準 / !恢復)
+    # 3. 預設角色快捷模式 (!甄嬛, !哆啦A夢, !安妮亞, !館長 等)
+    cmd_key = user_text.split()[0].replace("！", "!")
+    if cmd_key in PRESET_ROLES:
+        role_name, role_prompt = PRESET_ROLES[cmd_key]
+        full_prompt = f"""
+{role_prompt}
+請嚴格遵循以下原則：
+1. 完全融入該角色的語氣、口頭禪與核心價值觀。
+2. 回答保持簡短自然（1-3 句話內），符合 LINE 群組聊天習慣。
+3. 絕不脫離人設，不要出現 AI 助理的口吻。
+"""
+        USER_MODES[group_id] = {
+            "type": "impersonate",
+            "target": role_name,
+            "prompt": full_prompt
+        }
+        
+        try:
+            res = safe_generate_content(contents=[full_prompt, "用你本人的經典風格跟大家打個招呼！"])
+            intro_msg = res.text.strip()
+        except Exception:
+            intro_msg = f"大家好，我是 {role_name}！"
+
+        reply_to_line(event.reply_token, f"🎭 【已切換為 {role_name} 模式】\n\n{intro_msg}")
+        return
+
+    # 4. 成員動態模仿模式 (!模仿 / !廢話王 / !標準 / !恢復)
     if user_text.startswith("!模仿") or user_text.startswith("！模仿"):
         target_name = user_text[3:].strip()
         if not target_name:
@@ -484,7 +530,6 @@ def handle_message(event):
 
         real_name = target_profile["user_name"]
         
-        # 組裝動態模仿 Prompt
         impersonate_prompt = f"""
 你現在要完全扮演群組成員「{real_name}」。
 根據平時累積的印象紀錄，他的個性與說話風格如下：
@@ -503,7 +548,6 @@ def handle_message(event):
             "prompt": impersonate_prompt
         }
 
-        # 登場台詞
         try:
             res = safe_generate_content(contents=[impersonate_prompt, "用你本人的風格跟大家打個招呼並說一句話！"])
             intro_msg = res.text.strip()
@@ -523,7 +567,7 @@ def handle_message(event):
         reply_to_line(event.reply_token, "🤖 已恢復為標準貼心小幫手模式！")
         return
 
-    # 4. 對話摘要
+    # 5. 對話摘要
     if re.match(r"^摘要\s*(\d+)?$", user_text):
         limit = int(re.match(r"^摘要\s*(\d+)?$", user_text).group(1) or 100)
         logs = [f"[{get_user_name(group_id, m['user_id'])}]: {m['text']}" for m in group_chat_history[group_id][-limit:]]
@@ -535,7 +579,7 @@ def handle_message(event):
             reply_to_line(event.reply_token, "😅 摘要生成失敗，AI 伺服器忙碌中（503），請稍後再試！")
         return
 
-    # 5. 廢話王排行榜
+    # 6. 廢話王排行榜
     if "廢話王" in user_text and ("今日" in user_text or "@" in user_text or user_text == "廢話王"):
         leaderboard = get_custom_leaderboard(group_id, days=1)
         if not leaderboard:
@@ -559,7 +603,7 @@ def handle_message(event):
             reply_to_line(event.reply_token, "\n".join(msg_lines))
         return
 
-    # 6. 搜尋歷史發言
+    # 7. 搜尋歷史發言
     if re.match(r"^(搜尋|找|查)\s*(.+)$", user_text):
         keyword = re.match(r"^(搜尋|找|查)\s*(.+)$", user_text).group(2).strip()
         results = search_db_messages(group_id, keyword)
@@ -572,7 +616,7 @@ def handle_message(event):
             reply_to_line(event.reply_token, "\n".join(msg_lines))
         return
 
-    # 7. 分帳助手 (!記帳 / ！記帳)
+    # 8. 分帳助手 (!記帳 / ！記帳)
     if re.match(r"^[!！]記帳\s+(\S+)\s+(\d+(\.\d+)?)\s+(.+)$", user_text):
         m = re.match(r"^[!！]記帳\s+(\S+)\s+(\d+(\.\d+)?)\s+(.+)$", user_text)
         if add_expense(group_id, m.group(1), float(m.group(2)), m.group(4)):
@@ -585,7 +629,7 @@ def handle_message(event):
         if clear_expenses(group_id): reply_to_line(event.reply_token, "🗑️ 群組帳務資料已全部清空！")
         return
 
-    # 8. 美食抽籤 (!新增餐廳 / ！新增餐廳)
+    # 9. 美食抽籤 (!新增餐廳 / ！新增餐廳)
     if re.match(r"^[!！]新增餐廳\s+(.+)$", user_text):
         r_name = re.match(r"^[!！]新增餐廳\s+(.+)$", user_text).group(1).strip()
         if add_restaurant(group_id, r_name): reply_to_line(event.reply_token, f"🍱 已新增餐廳：「{r_name}」到口袋名單！")
@@ -603,7 +647,7 @@ def handle_message(event):
                 reply_to_line(event.reply_token, f"🎲 今天的命定美食是：【{chosen}】！\n（AI 忙碌中，先讓你選這一家！）")
         return
 
-    # 9. 黑歷史成語 (!黑歷史 / ！黑歷史)
+    # 10. 黑歷史成語 (!黑歷史 / ！黑歷史)
     if re.match(r"^[!！]黑歷史(\s+.*)?$", user_text):
         m_target = re.match(r"^[!！]黑歷史(\s+.*)?$", user_text).group(1)
         target_name = m_target.strip() if m_target else get_user_name(group_id, user_id)
@@ -625,7 +669,7 @@ def handle_message(event):
                 reply_to_line(event.reply_token, "😅 AI 伺服器忙碌中（503），黑歷史成語產出失敗，請稍後再試！")
         return
 
-    # 10. 默契大考驗 (!出題 / ！出題)
+    # 11. 默契大考驗 (!出題 / ！出題)
     if user_text in ["!出題", "！出題"]:
         prompt = "請設計一題爆笑且具爭議性的「二選一情境選擇題」，給出題目與 A、B 選項。"
         try:
@@ -656,7 +700,7 @@ def handle_message(event):
                 del group_games[group_id]
         return
 
-    # 11. AI 智能對話與記憶（群組過濾：必須有 !問/！問 或 提及機器人mention 才會回應）
+    # 12. AI 智能對話與記憶（群組過濾：必須有 !問/！問 或 提及機器人mention 才會回應）
     is_group = (source_type == "group")
     is_cmd = user_text.startswith("!問") or user_text.startswith("！問") or user_text.startswith("!") or user_text.startswith("！")
 
