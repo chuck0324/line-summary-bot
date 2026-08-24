@@ -51,7 +51,7 @@ USER_MODES = {}
 group_chat_history = {}
 group_games = {}
 
-# ==================== PostgreSQL 資料庫操作 ====================
+# ==================== 資料庫操作 ====================
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
@@ -89,7 +89,7 @@ def get_user_profile(user_id):
                 "summary": row[3] or "尚無紀錄"
             }
     except Exception as e:
-        print(f"[DB Error] 讀取 Profile 失敗: {e}")
+        print(f"[DB Error] 讀取成員檔案失敗: {e}")
     return {"name": "成員", "self_desc": "無", "others_opinion": "無", "summary": "尚無紀錄"}
 
 def get_user_profile_by_name(user_name):
@@ -113,7 +113,7 @@ def get_user_profile_by_name(user_name):
                 "summary": row[4] or "尚無紀錄"
             }
     except Exception as e:
-        print(f"[DB Error] 依姓名讀取 Profile 失敗: {e}")
+        print(f"[DB Error] 依姓名讀取成員檔案失敗: {e}")
     return None
 
 # ==================== 穩健的 AI 呼叫封裝（含 503 自動重試） ====================
@@ -448,18 +448,24 @@ def handle_message(event):
         help_text = (
             "🤖 【群組小幫手全功能選單】\n\n"
             "🤖 AI 問答與對話整理：\n"
-            "• `!問 [問題]` 或 `@機器人 [問題]`：AI 互動\n"
-            "• `摘要` 或 `摘要 50`：整理近期對話重點\n\n"
+            "• `!問 [問題]` 或 `@機器人 [問題]`：AI 互動（範例：`!問 今天天氣怎樣`）\n"
+            "• `摘要` 或 `摘要 50`：整理近期對話重點（範例：`摘要 30`）\n\n"
             "🎭 模式與模仿切換：\n"
-            "• `!模仿 [名字]`：讓 AI 完全扮演資料庫中的成員\n"
-            "• `!恢復` / `!標準`：恢復為標準助手\n"
-            "• `!廢話王`：切換為幽默吐槽模式\n\n"
+            "• `!模仿 [名字]`：讓 AI 完全扮演成員的說話風格（範例：`!模仿 阿明`）\n"
+            "• `!恢復` / `!標準`：恢復為標準助手（範例：`!恢復`）\n"
+            "• `!廢話王`：切換為幽默吐槽模式（範例：`!廢話王`）\n\n"
             "👑 排行榜與歷史搜尋：\n"
-            "• `今日廢話王` / `廢話王 7`：發言排行榜\n"
-            "• `搜尋 [關鍵字]`：搜尋歷史發言\n\n"
-            "🍱 美食抽籤：`!新增餐廳 [名稱]` / `!吃什麼`\n"
-            "💰 群組記帳：`!記帳 [名字] [金額] [品項]` / `!算帳` / `!清空帳目`\n"
-            "🎮 互動遊戲：`!黑歷史` / `!出題` / `!回答 [A/B]`"
+            "• `今日廢話王` / `廢話王 7`：發言排行榜（範例：`廢話王 3`）\n"
+            "• `搜尋 [關鍵字]`：搜尋歷史發言（範例：`搜尋 聚餐`）\n\n"
+            "🍱 美食抽籤：\n"
+            "• `!新增餐廳 [名稱]`（範例：`!新增餐廳 鼎泰豐`）\n"
+            "• `!吃什麼`（範例：`!吃什麼`）\n\n"
+            "💰 群組記帳：\n"
+            "• `!記帳 [名字] [金額] [品項]`（範例：`!記帳 小明 500 晚餐`）\n"
+            "• `!算帳` / `!清空帳目`（範例：`!算帳`）\n\n"
+            "🎮 互動遊戲：\n"
+            "• `!黑歷史`（範例：`!黑歷史` 或 `!黑歷史 阿明`）\n"
+            "• `!出題` / `!回答 [A/B]`（範例：`!回答 A`）"
         )
         reply_to_line(event.reply_token, help_text)
         return
@@ -468,12 +474,12 @@ def handle_message(event):
     if user_text.startswith("!模仿") or user_text.startswith("！模仿"):
         target_name = user_text[3:].strip()
         if not target_name:
-            reply_to_line(event.reply_token, "請指定要模仿的人，例如：`!模仿 小明`")
+            reply_to_line(event.reply_token, "請指定要模仿的人，例如：`!模仿 阿明`")
             return
         
         target_profile = get_user_profile_by_name(target_name)
         if not target_profile:
-            reply_to_line(event.reply_token, f"😅 資料庫裡找不到與「{target_name}」相關的特徵紀錄喔！")
+            reply_to_line(event.reply_token, f"😅 找不到與「{target_name}」相關的成員印象紀錄喔！")
             return
 
         real_name = target_profile["user_name"]
@@ -481,7 +487,7 @@ def handle_message(event):
         # 組裝動態模仿 Prompt
         impersonate_prompt = f"""
 你現在要完全扮演群組成員「{real_name}」。
-根據資料庫記錄，他的個性與說話風格如下：
+根據平時累積的印象紀錄，他的個性與說話風格如下：
 - 自我陳述：{target_profile['self_desc']}
 - 朋友評價：{target_profile['others_opinion']}
 - 綜合特徵：{target_profile['summary']}
