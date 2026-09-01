@@ -1,6 +1,7 @@
 import os
 import sys
 import re
+import json
 import random
 import threading
 import time
@@ -52,10 +53,11 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_NAME = "gemini-3.6-flash"
 
-# 暫存狀態 (模式、模仿人格與遊戲)
+# 暫存狀態 (模式、模仿人格、遊戲與追劇快取)
 USER_MODES = {}
 group_chat_history = {}
 group_games = {}
+group_dramas = {}  # 儲存兩段式追劇的主題分類結果
 
 # 預設模仿角色庫
 PRESET_ROLES = {
@@ -113,7 +115,7 @@ def prepare_context_for_summary(raw_messages, max_chars=3500):
     """
     動態裁切與精簡對話記錄
     - 過濾無意義廢話
-    - 設定最多 3,500 字封頂保險 (約 6,000 Tokens)
+    - 設定字數上限保險
     """
     cleaned_messages = []
     total_chars = 0
@@ -439,12 +441,12 @@ def handle_message(event):
     if not is_command:
         log_message_to_db(group_id, user_id, user_text)
         
-        # 快取中紀錄發言人姓名，便於摘要前處理
+        # 快取中紀錄發言人姓名，便於摘要與追劇前處理
         if group_id not in group_chat_history: 
             group_chat_history[group_id] = []
         user_name = get_user_name(group_id, user_id)
         group_chat_history[group_id].append({'user_id': user_id, 'user_name': user_name, 'text': user_text})
-        if len(group_chat_history[group_id]) > 200: 
+        if len(group_chat_history[group_id]) > 500: 
             group_chat_history[group_id].pop(0)
 
     # 2. 說明選單
@@ -455,7 +457,9 @@ def handle_message(event):
             "🤖 【群組小幫手全功能選單】\n\n"
             "🤖 AI 問答與對話整理：\n"
             "• `!問 [問題]` 或 `@機器人 [問題]`：AI 互動（範例：`!問 今天天氣怎樣`）\n"
-            "• `摘要` 或 `摘要 50`：整理近期對話重點（範例：`摘要 30`）\n\n"
+            "• `摘要` 或 `摘要 50`：快速觀看整體重點報告\n"
+            "• `追劇` 或 `追劇 500`：拆解主題總覽目錄（兩段式追劇第一階）\n"
+            "• `追劇 1` / `追劇 2`：觀看特定主題詳細對話脈絡（兩段式追劇第二階）\n\n"
             "🎭 模式與角色模仿：\n"
             "• `!模仿 [名字]`：模仿群組成員風格（範例：`!模仿 阿明`）\n"
             f"• 預設 20 位角色快捷鍵：\n  {roles_list_str}\n"
@@ -552,28 +556,121 @@ def handle_message(event):
         reply_to_line(event.reply_token, "🤖 已恢復為標準貼心小幫手模式！")
         return
 
-    # 5.【三層過濾 Pipeline】對話摘要
+    # 5.【摘要與兩段式追劇分流處理】
+
+    # (A) 第二階段：輸入 `追劇 1`、`追劇 2` 檢視特定主題對話細節
+    if re.match(r"^追劇\s*(\d+)$", user_text):
+        topic_num = int(re.match(r"^追劇\s*(\d+)$", user_text).group(1))
+        drama_data = group_dramas.get(group_id)
+
+        if not drama_data or "topics" not in drama_data:
+            reply_to_line(event.reply_token, "💡 目前沒有快取的追劇目錄，請先輸入 `追劇` 或 `追劇 500` 生成主題列表喔！")
+            return
+
+        topics = drama_data["topics"]
+        if topic_num < 1 or topic_num > len(topics):
+            reply_to_line(event.reply_token, f"😅 找不到主題 {topic_num} 喔！目前共有 {len(topics)} 個主題，請輸入 `追劇 1` ~ `追劇 {len(topics)}`。")
+            return
+
+        selected_topic = topics[topic_num - 1]
+        
+        # 組合該主題的完整對話脈絡
+        reply_msg = f"🎬 【追劇第 {topic_num} 集：{selected_topic.get('title', '主題內容')}】\n"
+        reply_msg += f"📌 話題摘要：{selected_topic.get('summary', '無')}\n\n"
+        reply_msg += "💬 【成員對話脈絡與對白】：\n"
+        
+        dialogues = selected_topic.get("dialogues", [])
+        if isinstance(dialogues, list):
+            for d in dialogues:
+                reply_msg += f"• {d}\n"
+        else:
+            reply_msg += f"{dialogues}\n"
+
+        reply_to_line(event.reply_token, reply_msg.strip())
+        return
+
+    # (B) 第一階段：輸入 `追劇` 或 `追劇 500` 生成主題分類目錄列表
+    if re.match(r"^追劇(\s*500)?$", user_text) or user_text == "追劇":
+        raw_logs = group_chat_history.get(group_id, [])[-500:] # 預設抓取最多 500 則
+        cleaned_context = prepare_context_for_summary(raw_logs, max_chars=4000)
+        
+        if not cleaned_context:
+            reply_to_line(event.reply_token, "過去沒有足夠的實質討論內容可以補追喔！")
+            return
+
+        prompt = f"""請擔任群組對話脈絡拆解專家。請閱讀以下的群組聊天記錄，並將對話內容依據【話題/討論串性質】完全分類。
+有幾類就分類出幾個主題（例如有 3 個議題就分 3 類，有 5 個就分 5 類）。
+
+請嚴格輸出為 JSON 格式（不要包含任何額外的 Markdown 標籤說明），結構如下：
+[
+  {{
+    "title": "主題名稱 (例如: 假日聚餐地點討論)",
+    "summary": "一句話簡述該主題在聊什麼與最終結果",
+    "dialogues": [
+      "成員A: 某某訊息",
+      "成員B: 某某訊息"
+    ]
+  }}
+]
+
+對話記錄：
+{cleaned_context}
+"""
+        sys_inst = "你是一個精準提取對話討論串的 JSON 結構化解析器。"
+        try:
+            res = safe_generate_content(prompt_contents=prompt, system_instruction=sys_inst, temperature=0.2)
+            result_text = res.text.strip()
+            
+            # 清理 JSON 字串格式
+            if result_text.startswith("```json"):
+                result_text = result_text[7:]
+            if result_text.startswith("```"):
+                result_text = result_text[3:]
+            if result_text.endswith("```"):
+                result_text = result_text[:-3]
+            
+            topics_data = json.loads(result_text.strip())
+
+            # 暫存至群組快取
+            group_dramas[group_id] = {"topics": topics_data}
+
+            # 輸出第一階段：主題總覽目錄
+            menu_msg = f"📺 【群組追劇目錄】(共拆解出 {len(topics_data)} 個討論串)\n"
+            menu_msg += "───────────────────\n"
+            for idx, item in enumerate(topics_data, 1):
+                menu_msg += f"🔹 【追劇 {idx}】{item.get('title', '無題')}\n   └ {item.get('summary', '')}\n"
+            menu_msg += "───────────────────\n"
+            menu_msg += "👉 輸入 `追劇 1`、`追劇 2` 即可觀看該主題的詳細成員對話！"
+
+            reply_to_line(event.reply_token, menu_msg)
+
+        except Exception as e:
+            print(f"[Drama Pipeline Error] {e}")
+            reply_to_line(event.reply_token, "😅 追劇目錄解析失敗，請稍後再試一次！")
+        return
+
+    # (C) 一般摘要：輸入 `摘要` 或 `摘要 100` 快速觀看整體重點報告
     if re.match(r"^摘要\s*(\d+)?$", user_text):
-        limit = int(re.match(r"^摘要\s*(\d+)?$", user_text).group(1) or 100)
+        match = re.match(r"^摘要\s*(\d+)?$", user_text)
+        limit = int(match.group(2) or 100)
         raw_logs = group_chat_history.get(group_id, [])[-limit:]
         
-        # 經過前處理 (0 Token 廢話過濾 + 3,500 字封頂)
-        cleaned_context = prepare_context_for_summary(raw_logs, max_chars=3500)
+        cleaned_context = prepare_context_for_summary(raw_logs, max_chars=3000)
         
         if not cleaned_context:
             reply_to_line(event.reply_token, "過去沒有足夠的實質討論內容可以摘要喔！")
             return
 
-        prompt = f"""請擔任群組對話摘要助手，將以下對話內容整理成簡明扼要的重點報告。
+        prompt = f"""請將以下群組對話內容整理成簡明的重點摘要。
 
 輸出要求：
-1. 核心議題與重點討論結論 (列點說明)
+1. 核心議題與重點結論 (精簡列點)
 2. 待辦事項 / 約定時間地點 (若無則忽略)
 
 對話記錄：
 {cleaned_context}
 """
-        sys_inst = "你是一個高效率的群組對話整理助手。請分類並整理重點與待辦。"
+        sys_inst = "你是一個高效率的群組對話整理助手。"
         try:
             res = safe_generate_content(prompt_contents=prompt, system_instruction=sys_inst)
             reply_to_line(event.reply_token, res.text)
