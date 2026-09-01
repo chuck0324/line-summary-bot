@@ -843,4 +843,5 @@ def handle_message(event):
     reply_to_line(event.reply_token, reply_text)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 50
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
