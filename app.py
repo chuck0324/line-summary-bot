@@ -6,6 +6,7 @@ import random
 import threading
 import time
 import socket
+import requests
 import psycopg2
 from datetime import datetime
 from collections import Counter
@@ -92,15 +93,12 @@ def is_noise_message(text):
     """判斷文字是否為無實質意義的廢話或標籤 (0 Token 耗損)"""
     text = text.strip()
     
-    # 長度超過 8 字通常包含實質內容，不視為廢話
     if len(text) > 8:
         return False
         
-    # 含有問號可能是重要提問，保留
     if '?' in text or '？' in text:
         return False
 
-    # 廢話、標籤與指令的正則比對
     noise_patterns = [
         r'^[!\/！]\s*',                               # 指令開頭
         r'^(哈|haha|哈哈|呵呵|嘻嘻|啦|啊|喔|喔喔)+$',  # 重複字
@@ -124,16 +122,13 @@ def prepare_context_for_summary(raw_messages, max_chars=3500):
     cleaned_messages = []
     total_chars = 0
     
-    # 從最新訊息往前審核（優先保留最新的對話內容）
     for msg in reversed(raw_messages):
         text = msg.get("text", "").strip()
         user_name = msg.get("user_name", "成員")
         
-        # 濾除空訊息與廢話
         if not text or is_noise_message(text):
             continue
             
-        # 達上限即切斷
         if total_chars + len(text) > max_chars:
             break
             
@@ -177,7 +172,6 @@ def get_history_from_db(group_id, limit=500):
         cur.close()
         conn.close()
         
-        # 轉回舊到新的順序，並補上用戶名字
         raw_logs = []
         for uid, text in reversed(db_rows):
             u_name = get_user_name(group_id, uid)
@@ -232,7 +226,7 @@ def get_user_profile_by_name(user_name):
         print(f"[DB Error] 依姓名讀取成員檔案失敗: {e}")
     return None
 
-# ==================== 穩健的 AI 呼叫封裝 (修正 RequestOptions 報錯) ====================
+# ==================== 穩健的 AI 呼叫封裝 ====================
 def safe_generate_content(prompt_contents, system_instruction=None, temperature=0.7, retries=3, delay=2):
     config = types.GenerateContentConfig(
         temperature=temperature,
@@ -435,10 +429,25 @@ def callback():
         abort(400)
     except Exception as e:
         print(f"[Webhook Unhandled Exception] {e}")
-        return 'OK', 200 # 強制回傳 200，避免 LINE Webhook 收到 500 重試
+        return 'OK', 200
     return 'OK'
 
-# 修正抓取使用者名字邏輯 (解決 no such group 報錯)
+def show_loading_animation(chat_id, loading_seconds=20):
+    """呼叫 LINE 官方 API 顯示『正在輸入中...』動畫（完全免費）"""
+    try:
+        url = "https://api.line.me/v2/bot/chat/loading/start"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
+        }
+        payload = {
+            "chatId": chat_id,
+            "loadingSeconds": loading_seconds
+        }
+        requests.post(url, headers=headers, json=payload, timeout=5)
+    except Exception as e:
+        print(f"[Loading Animation Error] {e}")
+
 def get_user_name(group_id, user_id):
     if user_id == 'unknown_user': return "未知用戶"
     try:
@@ -448,7 +457,6 @@ def get_user_name(group_id, user_id):
                 profile = line_bot_api.get_group_member_profile(group_id, user_id)
                 return profile.display_name
             except Exception:
-                # 若不是群組（私訊）或抓不到群組成員 Profile，改抓個人 Profile
                 profile = line_bot_api.get_profile(user_id)
                 return profile.display_name
     except Exception:
@@ -475,12 +483,11 @@ def handle_message(event):
     user_id = getattr(event.source, 'user_id', 'unknown_user')
     user_text = event.message.text.strip()
 
-    # 1.【源頭防堵】僅在非指令訊息時，寫入 DB 與記憶庫
+    # 1. 寫入 DB 與記憶庫
     is_command = user_text.startswith(('!', '！', '/', '／'))
     if not is_command:
         log_message_to_db(group_id, user_id, user_text)
         
-        # 快取中紀錄發言人姓名
         if group_id not in group_chat_history: 
             group_chat_history[group_id] = []
         user_name = get_user_name(group_id, user_id)
@@ -613,7 +620,6 @@ def handle_message(event):
 
         selected_topic = topics[topic_num - 1]
         
-        # 組合該主題的完整對話脈絡
         reply_msg = f"🎬 【追劇第 {topic_num} 集：{selected_topic.get('title', '主題內容')}】\n"
         reply_msg += f"📌 話題摘要：{selected_topic.get('summary', '無')}\n\n"
         reply_msg += "💬 【成員對話脈絡與對白】：\n"
@@ -628,8 +634,11 @@ def handle_message(event):
         reply_to_line(event.reply_token, reply_msg.strip())
         return
 
-    # (B) 第一階段：輸入 `追劇` 或 `追劇 500`（向 DB 查詢 500 則紀錄）
+    # (B) 第一階段：輸入 `追劇` 或 `追劇 500`（觸發免費載入中動畫）
     if re.match(r"^追劇(\s*500)?$", user_text) or user_text == "追劇":
+        # 顯示 LINE 官方『正在輸入中...』動畫 (預設顯示 60 秒)
+        show_loading_animation(group_id, loading_seconds=60)
+
         raw_logs = get_history_from_db(group_id, limit=500)
         cleaned_context = prepare_context_for_summary(raw_logs, max_chars=4000)
         
@@ -660,7 +669,6 @@ def handle_message(event):
             res = safe_generate_content(prompt_contents=prompt, system_instruction=sys_inst, temperature=0.2)
             result_text = res.text.strip()
             
-            # 清理 JSON 字串格式
             if result_text.startswith("```json"):
                 result_text = result_text[7:]
             if result_text.startswith("```"):
@@ -688,8 +696,11 @@ def handle_message(event):
             reply_to_line(event.reply_token, "😅 追劇目錄解析失敗，請稍後再試一次！")
         return
 
-    # (C) 一般摘要：輸入 `摘要` 或 `摘要 100`（向 DB 查詢指定筆數）
+    # (C) 一般摘要：輸入 `摘要` 或 `摘要 100`（觸發免費載入中動畫）
     if re.match(r"^摘要\s*(\d+)?$", user_text):
+        # 也為摘要加入動畫效果，提升使用者體驗
+        show_loading_animation(group_id, loading_seconds=15)
+
         match = re.match(r"^摘要\s*(\d+)?$", user_text)
         limit = int(match.group(2) or 100)
         
@@ -832,5 +843,4 @@ def handle_message(event):
     reply_to_line(event.reply_token, reply_text)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    port = int(os.environ.get("PORT", 50
