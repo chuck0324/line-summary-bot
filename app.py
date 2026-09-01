@@ -786,4 +786,25 @@ def handle_message(event):
     is_cmd = user_text.startswith("!問") or user_text.startswith("！問") or user_text.startswith("!") or user_text.startswith("！")
 
     is_mentioned = False
-    if hasattr(event.message, 'mention') and
+    if hasattr(event.message, 'mention') and event.message.mention:
+        is_mentioned = True  
+
+    if is_group and not (is_cmd or is_mentioned):
+        return  
+
+    clean_msg = user_text
+    if clean_msg.startswith("!問") or clean_msg.startswith("！問"): 
+        clean_msg = clean_msg[2:].strip()
+    elif clean_msg.startswith("!") or clean_msg.startswith("！"): 
+        clean_msg = clean_msg[1:].strip()
+    
+    if not clean_msg: 
+        clean_msg = user_text
+
+    user_name = get_user_name(group_id, user_id)
+    reply_text = generate_ai_response(group_id, user_id, user_name, clean_msg)
+    reply_to_line(event.reply_token, reply_text)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
