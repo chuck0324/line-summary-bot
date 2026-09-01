@@ -5,10 +5,14 @@ import json
 import random
 import threading
 import time
+import socket
 import psycopg2
 from datetime import datetime
 from collections import Counter
 from flask import Flask, request, abort
+
+# 設定 Socket 預設逾時（秒），防堵底層連線卡死導致 500
+socket.setdefaulttimeout(10.0)
 
 # LINE SDK v3
 from linebot.v3 import WebhookHandler
@@ -102,7 +106,7 @@ def is_noise_message(text):
         r'^(哈|haha|哈哈|呵呵|嘻嘻|啦|啊|喔|喔喔)+$',  # 重複字
         r'^[xX][dD]+$',                                # 網路表情 (如: XD, XDDD)
         r'^(笑死|對啊|對阿|確實|確|真的|好喔|好啊|OK|ok|\+1|加一)$', # 短讚同詞
-        r'^(貼圖|照片|影片|語音訊息)$'                   # 系統標籤
+        r'^(貼圖|照片|影片|語音訊息)$'                    # 系統標籤
     ]
 
     for pattern in noise_patterns:
@@ -203,30 +207,35 @@ def get_user_profile_by_name(user_name):
         print(f"[DB Error] 依姓名讀取成員檔案失敗: {e}")
     return None
 
-# ==================== 穩健的 AI 呼叫封裝 ====================
+# ==================== 穩健的 AI 呼叫封裝 (含 Timeout 重試防頭卡死) ====================
 def safe_generate_content(prompt_contents, system_instruction=None, temperature=0.7, retries=3, delay=2):
     config = types.GenerateContentConfig(
         temperature=temperature,
         system_instruction=system_instruction
     ) if system_instruction else types.GenerateContentConfig(temperature=temperature)
 
+    # 設定 API Request 超時時間（10 秒）
+    request_options = types.RequestOptions(timeout=10.0)
+
     for attempt in range(retries):
         try:
             response = ai_client.models.generate_content(
                 model=MODEL_NAME,
                 contents=prompt_contents,
-                config=config
+                config=config,
+                request_options=request_options
             )
             return response
-        except APIError as e:
+        except (APIError, socket.timeout, TimeoutError, Exception) as e:
             print(f"[AI API Warning] 請求異常 (第 {attempt + 1} 次重試)... 錯誤: {e}")
             if attempt < retries - 1:
                 time.sleep(delay)
             else:
-                raise e
-        except Exception as e:
-            print(f"[AI Error] Unexpected Exception: {e}")
-            raise e
+                # 若達到重試上限，不拋出 Unhandled Exception 避免 HTTP 500
+                print(f"[AI Error] 達最大重試次數，宣告失敗: {e}")
+                class MockResponse:
+                    text = "😅 AI 伺服器回應逾時或連線異常，請稍後再試一次！"
+                return MockResponse()
 
 def update_user_profile_async(sender_id, sender_name, user_msg, bot_reply):
     def task():
@@ -268,7 +277,7 @@ FEATURE: 提煉出的特徵重點
                 elif line.startswith("FEATURE:"):
                     feature = line.replace("FEATURE:", "").strip()
 
-            if not feature:
+            if not feature or "伺服器回應逾時" in feature:
                 return
 
             target_id = sender_id
@@ -387,8 +396,6 @@ def generate_ai_response(chat_id, user_id, user_name, user_msg):
         bot_reply = response.text.strip()
         update_user_profile_async(user_id, user_name, user_msg, bot_reply)
         return bot_reply
-    except APIError:
-        return "😅 AI 伺服器目前流量過大或連線異常，請稍後再試一次！"
     except Exception as e:
         print(f"[AI Gen Error] {e}")
         return "⚠️ 系統發生了一點小狀況，請稍後再試！"
@@ -406,6 +413,9 @@ def callback():
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
+    except Exception as e:
+        print(f"[Webhook Unhandled Exception] {e}")
+        return 'OK', 200 # 強制回傳 200，避免 LINE Webhook 收到 500 重試
     return 'OK'
 
 def get_user_name(group_id, user_id):
@@ -419,14 +429,17 @@ def get_user_name(group_id, user_id):
         return f"用戶({user_id[:6]})"
 
 def reply_to_line(reply_token, text):
-    with ApiClient(configuration) as api_client_line:
-        line_bot_api = MessagingApi(api_client_line)
-        line_bot_api.reply_message_with_http_info(
-            ReplyMessageRequest(
-                reply_token=reply_token,
-                messages=[TextMessage(text=text)]
+    try:
+        with ApiClient(configuration) as api_client_line:
+            line_bot_api = MessagingApi(api_client_line)
+            line_bot_api.reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=reply_token,
+                    messages=[TextMessage(text=text)]
+                )
             )
-        )
+    except Exception as e:
+        print(f"[LINE Reply Error] {e}")
 
 # ==================== LINE 訊息事件處理 ====================
 @handler.add(MessageEvent, message=TextMessageContent)
@@ -773,25 +786,4 @@ def handle_message(event):
     is_cmd = user_text.startswith("!問") or user_text.startswith("！問") or user_text.startswith("!") or user_text.startswith("！")
 
     is_mentioned = False
-    if hasattr(event.message, 'mention') and event.message.mention:
-        is_mentioned = True  
-
-    if is_group and not (is_cmd or is_mentioned):
-        return  
-
-    clean_msg = user_text
-    if clean_msg.startswith("!問") or clean_msg.startswith("！問"): 
-        clean_msg = clean_msg[2:].strip()
-    elif clean_msg.startswith("!") or clean_msg.startswith("！"): 
-        clean_msg = clean_msg[1:].strip()
-    
-    if not clean_msg: 
-        clean_msg = user_text
-
-    user_name = get_user_name(group_id, user_id)
-    reply_text = generate_ai_response(group_id, user_id, user_name, clean_msg)
-    reply_to_line(event.reply_token, reply_text)
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    if hasattr(event.message, 'mention') and
