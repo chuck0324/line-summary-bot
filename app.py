@@ -232,23 +232,19 @@ def get_user_profile_by_name(user_name):
         print(f"[DB Error] 依姓名讀取成員檔案失敗: {e}")
     return None
 
-# ==================== 穩健的 AI 呼叫封裝 (含 Timeout 重試防頭卡死) ====================
+# ==================== 穩健的 AI 呼叫封裝 (修正 RequestOptions 報錯) ====================
 def safe_generate_content(prompt_contents, system_instruction=None, temperature=0.7, retries=3, delay=2):
     config = types.GenerateContentConfig(
         temperature=temperature,
         system_instruction=system_instruction
     ) if system_instruction else types.GenerateContentConfig(temperature=temperature)
 
-    # 設定 API Request 超時時間（10 秒）
-    request_options = types.RequestOptions(timeout=10.0)
-
     for attempt in range(retries):
         try:
             response = ai_client.models.generate_content(
                 model=MODEL_NAME,
                 contents=prompt_contents,
-                config=config,
-                request_options=request_options
+                config=config
             )
             return response
         except (APIError, socket.timeout, TimeoutError, Exception) as e:
@@ -256,7 +252,6 @@ def safe_generate_content(prompt_contents, system_instruction=None, temperature=
             if attempt < retries - 1:
                 time.sleep(delay)
             else:
-                # 若達到重試上限，不拋出 Unhandled Exception 避免 HTTP 500
                 print(f"[AI Error] 達最大重試次數，宣告失敗: {e}")
                 class MockResponse:
                     text = "😅 AI 伺服器回應逾時或連線異常，請稍後再試一次！"
@@ -443,15 +438,21 @@ def callback():
         return 'OK', 200 # 強制回傳 200，避免 LINE Webhook 收到 500 重試
     return 'OK'
 
+# 修正抓取使用者名字邏輯 (解決 no such group 報錯)
 def get_user_name(group_id, user_id):
     if user_id == 'unknown_user': return "未知用戶"
     try:
         with ApiClient(configuration) as api_client_line:
             line_bot_api = MessagingApi(api_client_line)
-            profile = line_bot_api.get_group_member_profile(group_id, user_id)
-            return profile.display_name
+            try:
+                profile = line_bot_api.get_group_member_profile(group_id, user_id)
+                return profile.display_name
+            except Exception:
+                # 若不是群組（私訊）或抓不到群組成員 Profile，改抓個人 Profile
+                profile = line_bot_api.get_profile(user_id)
+                return profile.display_name
     except Exception:
-        return f"用戶({user_id[:6]})"
+        return f"成員({user_id[:6]})"
 
 def reply_to_line(reply_token, text):
     try:
@@ -627,7 +628,7 @@ def handle_message(event):
         reply_to_line(event.reply_token, reply_msg.strip())
         return
 
-    # (B) 第一階段：輸入 `追劇` 或 `追劇 500`（改為直接向 DB 查詢 500 則紀錄）
+    # (B) 第一階段：輸入 `追劇` 或 `追劇 500`（向 DB 查詢 500 則紀錄）
     if re.match(r"^追劇(\s*500)?$", user_text) or user_text == "追劇":
         raw_logs = get_history_from_db(group_id, limit=500)
         cleaned_context = prepare_context_for_summary(raw_logs, max_chars=4000)
@@ -687,12 +688,11 @@ def handle_message(event):
             reply_to_line(event.reply_token, "😅 追劇目錄解析失敗，請稍後再試一次！")
         return
 
-    # (C) 一般摘要：輸入 `摘要` 或 `摘要 100`（改為直接向 DB 查詢指定筆數）
+    # (C) 一般摘要：輸入 `摘要` 或 `摘要 100`（向 DB 查詢指定筆數）
     if re.match(r"^摘要\s*(\d+)?$", user_text):
         match = re.match(r"^摘要\s*(\d+)?$", user_text)
         limit = int(match.group(2) or 100)
         
-        # 改為從資料庫抓取最新 N 則訊息
         raw_logs = get_history_from_db(group_id, limit=limit)
         cleaned_context = prepare_context_for_summary(raw_logs, max_chars=3000)
         
