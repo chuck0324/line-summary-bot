@@ -75,7 +75,7 @@ PRESET_ROLES = {
     "!美芽": ("野原美芽", "你現在是野原美芽（美冴）。個性暴躁但愛家，天天為了小新的調皮、買名牌包與減肥煩惱。講話非常有媽媽的威嚴。"),
     "!皇上": ("雍正皇上", "你現在是大清皇帝雍正。講話充滿帝王威嚴與霸氣，自稱『朕』，對臣下嚴厲，對後宮冷靜。喜歡講『朕知道了』、『放肆』、『退下吧』。"),
     "!聖嚴法師": ("聖嚴法師", "你現在是充滿智慧的聖嚴法師。講話極度慈悲、平靜且充滿禪意。核心哲學是『面對它、接受它、處理它、放下它』，用溫和語氣開導眾生迷津。"),
-    "!Joeman": ("Joeman", "你現在是知名 YouTuber Joeman（九妹）。講話節奏快、極具商業頭腦與開箱台詞。動不動就要做『平價 vs 奢華』對決。"),
+    "!Joeman": ("Joeman", "你現在是知名 YouTuber Joeman（九妹）。講話節奏快、極具商業頭頭與開箱台詞。動不動就要做『平價 vs 奢華』對決。"),
     "!阿扁": ("陳水扁", "你現在是前總統阿扁。講話帶有極強烈的台式政治演說韻律，語氣充滿渲染力與台灣國語腔調，招牌句型是『難道阿扁錯了嗎？』。"),
     "!許效順": ("許效顺", "你現在是澎恰恰的黃金搭檔許效順（順哥）。講話極具台灣在地俚語與基隆無厘頭幽默，擅長講鬼故事、念詩吐槽。"),
     "!安妮亞": ("安妮亞", "你現在是《間諜家家酒》的安妮亞·佛傑。用語簡短、喜歡吃花生、討厭讀書。講話帶有『哇庫哇庫（好興奮）』，經常以第三人稱『安妮亞』自稱。"),
@@ -141,7 +141,7 @@ def reply_to_line(reply_token, text):
     try:
         with ApiClient(configuration) as api_client_line:
             line_bot_api = MessagingApi(api_client_line)
-            line_bot_api.reply_message_with_http_info(
+            line_bot_api.reply_message(
                 ReplyMessageRequest(
                     reply_token=reply_token,
                     messages=[TextMessage(text=text)]
@@ -151,7 +151,7 @@ def reply_to_line(reply_token, text):
         print(f"[LINE Reply Error] {e}")
 
 def push_to_line(to_id, text):
-    """主動推播訊息至指定群組 (消耗每月免費 200 則 Push 額度)"""
+    """主動推播訊息至指定群組 (修正發送格式與補上 Debug Log)"""
     try:
         with ApiClient(configuration) as api_client_line:
             line_bot_api = MessagingApi(api_client_line)
@@ -161,8 +161,9 @@ def push_to_line(to_id, text):
                     messages=[TextMessage(text=text)]
                 )
             )
+            print(f"✅ [LINE Push Success] 已成功推播訊息至 {to_id}")
     except Exception as e:
-        print(f"[LINE Push Error] {e}")
+        print(f"❌ [LINE Push Error] 推播失敗: {e}")
 
 def get_user_name(group_id, user_id):
     if user_id == 'unknown_user': return "未知用戶"
@@ -178,7 +179,7 @@ def get_user_name(group_id, user_id):
     except Exception:
         return f"成員({user_id[:6]})"
 
-# ==================== 資料庫操作 (宣告於呼叫處上方) ====================
+# ==================== 資料庫操作 ====================
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
@@ -633,8 +634,8 @@ def handle_message(event):
 
     # (B) 第一階段：輸入 `追劇` 或 `追劇 500`（方案 1：Async Thread + Push 推播）
     if re.match(r"^追劇(\s*500)?$", user_text) or user_text == "追劇":
-        # 1. 0.5 秒內秒回提示，避免成員以為卡死
-        reply_to_line(event.reply_token, "🎬 收到追劇指令！正在為大家拆解近期熱門討論串，請稍候 10~15 秒... ⏳")
+        # 1. 0.5 秒內秒回提示，將時間調整為 30~40 秒
+        reply_to_line(event.reply_token, "🎬 收到追劇指令！正在為大家拆解近期的熱門討論串，請稍候 30~40 秒... ⏳")
 
         # 2. 定義背景 Thread 任務
         def process_drama_task(target_group_id):
@@ -797,51 +798,3 @@ def handle_message(event):
         except Exception:
             reply_to_line(event.reply_token, "😅 AI 伺服器忙碌中，出題失敗，請稍後再試！")
         return
-    elif re.match(r"^[!！]回答\s+(.+)$", user_text):
-        ans = re.match(r"^[!！]回答\s+(.+)$", user_text).group(1).strip()
-        if group_id not in group_games or 'question' not in group_games[group_id]:
-            reply_to_line(event.reply_token, "目前沒有進行中的題目，請先輸入 `!出題` 喔！")
-        else:
-            u_name = get_user_name(group_id, user_id)
-            group_games[group_id]['answers'][u_name] = ans
-            ans_dict = group_games[group_id]['answers']
-            if len(ans_dict) < 2:
-                reply_to_line(event.reply_token, f"✅ {u_name} 已選擇【{ans}】！還需要至少 1 位成員輸入 `!回答`！")
-            else:
-                ans_summary = "\n".join([f"• {k}: {v}" for k, v in ans_dict.items()])
-                prompt = f"評定以下默契指數 (0%~100%) 與講評：\n{ans_summary}"
-                try:
-                    res = safe_generate_content(prompt_contents=prompt)
-                    reply_to_line(event.reply_token, f"🎯 【默契結算】\n\n成員選擇：\n{ans_summary}\n\n🤖 裁判講評：\n{res.text}")
-                except Exception:
-                    reply_to_line(event.reply_token, f"🎯 【默契結算】\n\n成員選擇：\n{ans_summary}\n\n（AI 忙碌中，你們這群人的默契自己心裡有數啦！）")
-                del group_games[group_id]
-        return
-
-    # 10. AI 智能對話與記憶
-    is_group = (source_type == "group")
-    is_cmd = user_text.startswith("!問") or user_text.startswith("！問") or user_text.startswith("!") or user_text.startswith("！")
-
-    is_mentioned = False
-    if hasattr(event.message, 'mention') and event.message.mention:
-        is_mentioned = True  
-
-    if is_group and not (is_cmd or is_mentioned):
-        return  
-
-    clean_msg = user_text
-    if clean_msg.startswith("!問") or clean_msg.startswith("！問"): 
-        clean_msg = clean_msg[2:].strip()
-    elif clean_msg.startswith("!") or clean_msg.startswith("！"): 
-        clean_msg = clean_msg[1:].strip()
-    
-    if not clean_msg: 
-        clean_msg = user_text
-
-    user_name = get_user_name(group_id, user_id)
-    reply_text = generate_ai_response(group_id, user_id, user_name, clean_msg)
-    reply_to_line(event.reply_token, reply_text)
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
