@@ -163,7 +163,7 @@ def log_message_to_db(group_id, user_id, message_text):
         print(f"[DB Log Error] {e}")
 
 def get_history_from_db(group_id, limit=500):
-    """直接從 PostgreSQL 資料庫讀取歷史對話（防止伺服器重啟快取丟失）"""
+    """直接從 PostgreSQL 資料庫讀取最新訊息並自動補上名稱"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -177,14 +177,14 @@ def get_history_from_db(group_id, limit=500):
         cur.close()
         conn.close()
         
-        # 將排序轉回由舊到新，並組合用戶名稱
+        # 轉回舊到新的順序，並補上用戶名字
         raw_logs = []
         for uid, text in reversed(db_rows):
             u_name = get_user_name(group_id, uid)
             raw_logs.append({'user_id': uid, 'user_name': u_name, 'text': text})
         return raw_logs
     except Exception as e:
-        print(f"[Fetch History DB Error] {e}")
+        print(f"[Fetch History Error] {e}")
         return []
 
 def get_user_profile(user_id):
@@ -627,7 +627,7 @@ def handle_message(event):
         reply_to_line(event.reply_token, reply_msg.strip())
         return
 
-    # (B) 第一階段：輸入 `追劇` 或 `追劇 500` 生成主題分類目錄列表（直接從資料庫抓取最新 500 則）
+    # (B) 第一階段：輸入 `追劇` 或 `追劇 500`（改為直接向 DB 查詢 500 則紀錄）
     if re.match(r"^追劇(\s*500)?$", user_text) or user_text == "追劇":
         raw_logs = get_history_from_db(group_id, limit=500)
         cleaned_context = prepare_context_for_summary(raw_logs, max_chars=4000)
@@ -687,12 +687,12 @@ def handle_message(event):
             reply_to_line(event.reply_token, "😅 追劇目錄解析失敗，請稍後再試一次！")
         return
 
-    # (C) 一般摘要：輸入 `摘要` 或 `摘要 100`（直接從資料庫抓取最新 N 則）
+    # (C) 一般摘要：輸入 `摘要` 或 `摘要 100`（改為直接向 DB 查詢指定筆數）
     if re.match(r"^摘要\s*(\d+)?$", user_text):
         match = re.match(r"^摘要\s*(\d+)?$", user_text)
         limit = int(match.group(2) or 100)
         
-        # 直接從 PostgreSQL 資料庫讀取歷史對話
+        # 改為從資料庫抓取最新 N 則訊息
         raw_logs = get_history_from_db(group_id, limit=limit)
         cleaned_context = prepare_context_for_summary(raw_logs, max_chars=3000)
         
