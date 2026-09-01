@@ -75,7 +75,7 @@ PRESET_ROLES = {
     "!聖嚴法師": ("聖嚴法師", "你現在是充滿智慧的聖嚴法師。講話極度慈悲、平靜且充滿禪意。核心哲學是『面對它、接受它、處理它、放下它』，用溫和語氣開導眾生迷津。"),
     "!Joeman": ("Joeman", "你現在是知名 YouTuber Joeman（九妹）。講話節奏快、極具商業頭腦與開箱台詞。動不動就要做『平價 vs 奢華』對決。"),
     "!阿扁": ("陳水扁", "你現在是前總統阿扁。講話帶有極強烈的台式政治演說韻律，語氣充滿渲染力與台灣國語腔調，招牌句型是『難道阿扁錯了嗎？』。"),
-    "!許效順": ("許效順", "你現在是澎恰恰的黃金搭檔許效順（順哥）。講話極具台灣在地俚語與基隆無厘頭幽默，擅長講鬼故事、念詩吐槽。"),
+    "!許效順": ("許效顺", "你現在是澎恰恰的黃金搭檔許效順（順哥）。講話極具台灣在地俚語與基隆無厘頭幽默，擅長講鬼故事、念詩吐槽。"),
     "!安妮亞": ("安妮亞", "你現在是《間諜家家酒》的安妮亞·佛傑。用語簡短、喜歡吃花生、討厭讀書。講話帶有『哇庫哇庫（好興奮）』，經常以第三人稱『安妮亞』自稱。"),
     "!兩津勘吉": ("兩津勘吉", "你現在是《烏龍派出所》的阿兩（兩津勘吉）。自稱『本所阿兩』，極度貪財、喜歡賽馬、模型與打電玩。講話粗魯豪爽、充滿義氣。"),
     "!盛竹如": ("盛竹如", "你現在是類戲劇資深旁白盛竹如。講話速度緩慢、字斟句酌且極具懸疑戲劇張力。招牌口頭禪：『究竟是道德的喪失，還是人性的泯滅？讓我們繼續看下去...』。"),
@@ -161,6 +161,31 @@ def log_message_to_db(group_id, user_id, message_text):
         conn.close()
     except Exception as e:
         print(f"[DB Log Error] {e}")
+
+def get_history_from_db(group_id, limit=500):
+    """直接從 PostgreSQL 資料庫讀取歷史對話（防止伺服器重啟快取丟失）"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT user_id, message_text 
+            FROM message_logs 
+            WHERE group_id = %s 
+            ORDER BY created_at DESC LIMIT %s
+        ''', (group_id, limit))
+        db_rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        # 將排序轉回由舊到新，並組合用戶名稱
+        raw_logs = []
+        for uid, text in reversed(db_rows):
+            u_name = get_user_name(group_id, uid)
+            raw_logs.append({'user_id': uid, 'user_name': u_name, 'text': text})
+        return raw_logs
+    except Exception as e:
+        print(f"[Fetch History DB Error] {e}")
+        return []
 
 def get_user_profile(user_id):
     try:
@@ -454,7 +479,7 @@ def handle_message(event):
     if not is_command:
         log_message_to_db(group_id, user_id, user_text)
         
-        # 快取中紀錄發言人姓名，便於摘要與追劇前處理
+        # 快取中紀錄發言人姓名
         if group_id not in group_chat_history: 
             group_chat_history[group_id] = []
         user_name = get_user_name(group_id, user_id)
@@ -602,9 +627,9 @@ def handle_message(event):
         reply_to_line(event.reply_token, reply_msg.strip())
         return
 
-    # (B) 第一階段：輸入 `追劇` 或 `追劇 500` 生成主題分類目錄列表
+    # (B) 第一階段：輸入 `追劇` 或 `追劇 500` 生成主題分類目錄列表（直接從資料庫抓取最新 500 則）
     if re.match(r"^追劇(\s*500)?$", user_text) or user_text == "追劇":
-        raw_logs = group_chat_history.get(group_id, [])[-500:] # 預設抓取最多 500 則
+        raw_logs = get_history_from_db(group_id, limit=500)
         cleaned_context = prepare_context_for_summary(raw_logs, max_chars=4000)
         
         if not cleaned_context:
@@ -662,12 +687,13 @@ def handle_message(event):
             reply_to_line(event.reply_token, "😅 追劇目錄解析失敗，請稍後再試一次！")
         return
 
-    # (C) 一般摘要：輸入 `摘要` 或 `摘要 100` 快速觀看整體重點報告
+    # (C) 一般摘要：輸入 `摘要` 或 `摘要 100`（直接從資料庫抓取最新 N 則）
     if re.match(r"^摘要\s*(\d+)?$", user_text):
         match = re.match(r"^摘要\s*(\d+)?$", user_text)
         limit = int(match.group(2) or 100)
-        raw_logs = group_chat_history.get(group_id, [])[-limit:]
         
+        # 直接從 PostgreSQL 資料庫讀取歷史對話
+        raw_logs = get_history_from_db(group_id, limit=limit)
         cleaned_context = prepare_context_for_summary(raw_logs, max_chars=3000)
         
         if not cleaned_context:
