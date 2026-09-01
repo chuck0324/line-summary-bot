@@ -62,7 +62,7 @@ PRESET_ROLES = {
     "!甄嬛": ("甄嬛", "你現在是清朝宮廷的甄嬛。講話極具宮鬥典雅風格，喜用『臣妾』、『本宮』、『極好的』、『倒也不負恩澤』，帶有淡淡的酸楚與宮廷機鋒，句尾要優雅。"),
     "!哆啦A夢": ("哆啦A夢", "你現在是來自22世紀的貓型機器人哆啦A夢。個性熱心但遇到大雄會很無奈，喜歡吃銅鑼燒、怕老鼠。講話親切，動不動就想從四次元口袋拿道具出來解決問題！"),
     "!小丸子": ("櫻桃小丸子", "你現在是櫻桃小丸子。個性懶散、愛做白日夢、討厭寫作業，講話充滿無厘頭的童真與人生哲理，句尾常帶有『巴拉巴拉』或『總之就是這樣啦』。"),
-    "!花輪": ("花輪和彥", "你現在是花輪少爺。講話極度紳士、優雅且帶有ABC腔，開口閉口都是『Baby~』，動不動就提到『我們家的老管家秀叔』或他在國外渡假的經驗。"),
+    "!花輪": ("花輪和彥", "你現在是花輪少爺。講話極度紳士、優雅且帶有ABC腔，開頭閉口都是『Baby~』，動不動就提到『我們家的老管家秀叔』或他在國外渡假的經驗。"),
     "!小新": ("野原新之助", "你現在是5歲的野原新之助（小新）。講話經常積非成是、講錯成語，喜歡漂亮大姊姊、動感超人與巧克比，風格極度欠扁搞笑。"),
     "!美芽": ("野原美芽", "你現在是野原美芽（美冴）。個性暴躁但愛家，天天為了小新的調皮、買名牌包與減肥煩惱。講話非常有媽媽的威嚴。"),
     "!皇上": ("雍正皇上", "你現在是大清皇帝雍正。講話充滿帝王威嚴與霸氣，自稱『朕』，對臣下嚴厲，對後宮冷靜。喜歡講『朕知道了』、『放肆』、『退下吧』。"),
@@ -80,6 +80,62 @@ PRESET_ROLES = {
     "!天線寶寶": ("天線寶寶", "你現在是神奇島的天線寶寶群體。講話極度幼齡且重複性高，喜歡說『你好～』、『再見～』、『天線寶寶時間～』。"),
     "!丁滿與澎澎": ("丁滿與澎澎", "你現在是《獅子王》的最佳搭檔丁滿與澎澎。兩人在對話中會互相接話、吐槽，傳遞『Hakuna Matata（無憂無慮）』的人生哲學。")
 }
+
+# ==================== 三層過濾 Pipeline Helper ====================
+def is_noise_message(text):
+    """判斷文字是否為無實質意義的廢話或標籤 (0 Token 耗損)"""
+    text = text.strip()
+    
+    # 長度超過 8 字通常包含實質內容，不視為廢話
+    if len(text) > 8:
+        return False
+        
+    # 含有問號可能是重要提問，保留
+    if '?' in text or '？' in text:
+        return False
+
+    # 廢話、標籤與指令的正則比對
+    noise_patterns = [
+        r'^[!\/！]\s*',                               # 指令開頭
+        r'^(哈|haha|哈哈|呵呵|嘻嘻|啦|啊|喔|喔喔)+$',  # 重複字
+        r'^[xX][dD]+$',                                # 網路表情 (如: XD, XDDD)
+        r'^(笑死|對啊|對阿|確實|確|真的|好喔|好啊|OK|ok|\+1|加一)$', # 短讚同詞
+        r'^(貼圖|照片|影片|語音訊息)$'                   # 系統標籤
+    ]
+
+    for pattern in noise_patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            return True
+
+    return False
+
+def prepare_context_for_summary(raw_messages, max_chars=3500):
+    """
+    動態裁切與精簡對話記錄
+    - 過濾無意義廢話
+    - 設定最多 3,500 字封頂保險 (約 6,000 Tokens)
+    """
+    cleaned_messages = []
+    total_chars = 0
+    
+    # 從最新訊息往前審核（優先保留最新的對話內容）
+    for msg in reversed(raw_messages):
+        text = msg.get("text", "").strip()
+        user_name = msg.get("user_name", "成員")
+        
+        # 濾除空訊息與廢話
+        if not text or is_noise_message(text):
+            continue
+            
+        # 達上限即切斷
+        if total_chars + len(text) > max_chars:
+            break
+            
+        cleaned_messages.append(f"{user_name}: {text}")
+        total_chars += len(text)
+        
+    cleaned_messages.reverse()
+    return "\n".join(cleaned_messages)
 
 # ==================== 資料庫操作 ====================
 def get_db_connection():
@@ -378,11 +434,18 @@ def handle_message(event):
     user_id = getattr(event.source, 'user_id', 'unknown_user')
     user_text = event.message.text.strip()
 
-    # 1. 背景寫入紀錄
-    log_message_to_db(group_id, user_id, user_text)
-    if group_id not in group_chat_history: group_chat_history[group_id] = []
-    group_chat_history[group_id].append({'user_id': user_id, 'text': user_text})
-    if len(group_chat_history[group_id]) > 200: group_chat_history[group_id].pop(0)
+    # 1.【源頭防堵】僅在非指令訊息時，寫入 DB 與記憶庫
+    is_command = user_text.startswith(('!', '！', '/', '／'))
+    if not is_command:
+        log_message_to_db(group_id, user_id, user_text)
+        
+        # 快取中紀錄發言人姓名，便於摘要前處理
+        if group_id not in group_chat_history: 
+            group_chat_history[group_id] = []
+        user_name = get_user_name(group_id, user_id)
+        group_chat_history[group_id].append({'user_id': user_id, 'user_name': user_name, 'text': user_text})
+        if len(group_chat_history[group_id]) > 200: 
+            group_chat_history[group_id].pop(0)
 
     # 2. 說明選單
     if user_text in ["!help", "！help", "!說明", "！說明", "!指令", "！指令", "help", "說明", "指令"]:
@@ -489,11 +552,27 @@ def handle_message(event):
         reply_to_line(event.reply_token, "🤖 已恢復為標準貼心小幫手模式！")
         return
 
-    # 5. 對話摘要
+    # 5.【三層過濾 Pipeline】對話摘要
     if re.match(r"^摘要\s*(\d+)?$", user_text):
         limit = int(re.match(r"^摘要\s*(\d+)?$", user_text).group(1) or 100)
-        logs = [f"[{get_user_name(group_id, m['user_id'])}]: {m['text']}" for m in group_chat_history[group_id][-limit:]]
-        prompt = "\n".join(logs)
+        raw_logs = group_chat_history.get(group_id, [])[-limit:]
+        
+        # 經過前處理 (0 Token 廢話過濾 + 3,500 字封頂)
+        cleaned_context = prepare_context_for_summary(raw_logs, max_chars=3500)
+        
+        if not cleaned_context:
+            reply_to_line(event.reply_token, "過去沒有足夠的實質討論內容可以摘要喔！")
+            return
+
+        prompt = f"""請擔任群組對話摘要助手，將以下對話內容整理成簡明扼要的重點報告。
+
+輸出要求：
+1. 核心議題與重點討論結論 (列點說明)
+2. 待辦事項 / 約定時間地點 (若無則忽略)
+
+對話記錄：
+{cleaned_context}
+"""
         sys_inst = "你是一個高效率的群組對話整理助手。請分類並整理重點與待辦。"
         try:
             res = safe_generate_content(prompt_contents=prompt, system_instruction=sys_inst)
