@@ -8,7 +8,7 @@ import time
 import socket
 import requests
 import psycopg2
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import Counter
 from flask import Flask, request, abort
 
@@ -198,17 +198,31 @@ def log_message_to_db(group_id, user_id, message_text):
     except Exception as e:
         print(f"[DB Log Error] {e}")
 
-def get_history_from_db(group_id, limit=500):
-    """從 PostgreSQL 資料庫讀取最新訊息並自動補上成員名稱"""
+def get_history_from_db(group_id, limit=500, target_date=None):
+    """從 PostgreSQL 讀取對話，支援傳入特定日期 (target_date: "YYYY-MM-DD")"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute('''
-            SELECT user_id, message_text 
-            FROM message_logs 
-            WHERE group_id = %s 
-            ORDER BY created_at DESC LIMIT %s
-        ''', (group_id, limit))
+        
+        if target_date:
+            query = '''
+                SELECT user_id, message_text 
+                FROM message_logs 
+                WHERE group_id = %s 
+                  AND created_at >= %s::date 
+                  AND created_at < (%s::date + INTERVAL '1 day')
+                ORDER BY created_at DESC LIMIT %s
+            '''
+            cur.execute(query, (group_id, target_date, target_date, limit))
+        else:
+            query = '''
+                SELECT user_id, message_text 
+                FROM message_logs 
+                WHERE group_id = %s 
+                ORDER BY created_at DESC LIMIT %s
+            '''
+            cur.execute(query, (group_id, limit))
+            
         db_rows = cur.fetchall()
         cur.close()
         conn.close()
@@ -502,8 +516,8 @@ def handle_message(event):
             "🤖 AI 問答與對話整理：\n"
             "• `!問 [問題]` 或 `@機器人 [問題]`：AI 互動（範例：`!問 今天天氣怎樣`）\n"
             "• `摘要` 或 `摘要 50`：快速觀看整體重點報告\n"
-            "• `追劇` 或 `追劇 500`：拆解主題總覽目錄（兩段式追劇第一階）\n"
-            "• `追劇 1` / `追劇 2`：觀看特定主題詳細對話脈絡（兩段式追劇第二階）\n\n"
+            "• `追劇` 或 `追劇 9/1`：拆解主題總覽目錄（支援特定日期）\n"
+            "• `追劇 1` / `追劇 2`：觀看特定主題詳細對話脈絡\n\n"
             "🎭 模式與角色模仿：\n"
             "• `!模仿 [名字]`：模仿群組成員風格（範例：`!模仿 阿明`）\n"
             f"• 預設 20 位角色快捷鍵：\n  {roles_list_str}\n"
@@ -608,7 +622,7 @@ def handle_message(event):
         drama_data = group_dramas.get(group_id)
 
         if not drama_data or "topics" not in drama_data:
-            reply_to_line(event.reply_token, "💡 目前沒有快取的追劇目錄，請先輸入 `追劇` 或 `追劇 500` 生成主題列表喔！")
+            reply_to_line(event.reply_token, "💡 目前沒有快取的追劇目錄，請先輸入 `追劇` 或 `追劇 9/1` 生成主題列表喔！")
             return
 
         topics = drama_data["topics"]
@@ -632,19 +646,46 @@ def handle_message(event):
         reply_to_line(event.reply_token, reply_msg.strip())
         return
 
-    # (B) 第一階段：輸入 `追劇` 或 `追劇 500`（方案 1：Async Thread + Push 推播）
-    if re.match(r"^追劇(\s*500)?$", user_text) or user_text == "追劇":
-        # 1. 0.5 秒內秒回提示，將時間調整為 30~40 秒
-        reply_to_line(event.reply_token, "🎬 收到追劇指令！正在為大家拆解近期的熱門討論串，請稍候 30~40 秒... ⏳")
+    # (B) 第一階段：輸入 `追劇`、`追劇 500` 或指定日期（如 `追劇 2026-09-01`、`追劇 9/1`）
+    drama_match = re.match(r"^追劇(?:\s+(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}|\d{1,4}))?$", user_text)
+    
+    if drama_match or user_text == "追劇":
+        raw_param = drama_match.group(1) if drama_match else None
+        target_date = None
+        date_display = "近期"
+
+        # 解析日期或筆數參數
+        if raw_param:
+            today = datetime.now()
+            try:
+                # 情況 1: YYYY-MM-DD 或 YYYY/MM/DD
+                if len(raw_param.split('-')) == 3 or len(raw_param.split('/')) == 3:
+                    clean_date = raw_param.replace('/', '-')
+                    target_date = datetime.strptime(clean_date, "%Y-%m-%d").strftime("%Y-%m-%d")
+                    date_display = target_date
+                # 情況 2: MM-DD 或 MM/DD (自動補上今年)
+                elif len(raw_param.split('-')) == 2 or len(raw_param.split('/')) == 2:
+                    clean_date = f"{today.year}-" + raw_param.replace('/', '-')
+                    target_date = datetime.strptime(clean_date, "%Y-%m-%d").strftime("%Y-%m-%d")
+                    date_display = target_date
+                # 情況 3: 單純傳入數字 500（當作筆數而非日期）
+                elif raw_param.isdigit():
+                    date_display = f"近期 {raw_param} 則"
+            except ValueError:
+                reply_to_line(event.reply_token, "😅 日期格式不正確喔！請使用 `追劇 2026-09-01` 或 `追劇 9/1`。")
+                return
+
+        # 1. 0.5 秒內秒回提示
+        reply_to_line(event.reply_token, f"🎬 收到【{date_display}】追劇指令！正在為大家拆解對話討論串，請稍候 30~40 秒... ⏳")
 
         # 2. 定義背景 Thread 任務
-        def process_drama_task(target_group_id):
+        def process_drama_task(target_group_id, query_date, display_str):
             try:
-                raw_logs = get_history_from_db(target_group_id, limit=500)
+                raw_logs = get_history_from_db(target_group_id, limit=500, target_date=query_date)
                 cleaned_context = prepare_context_for_summary(raw_logs, max_chars=4000)
                 
                 if not cleaned_context:
-                    push_to_line(target_group_id, "過去沒有足夠的實質討論內容可以補追喔！")
+                    push_to_line(target_group_id, f"🔍 在【{display_str}】沒有找到足夠的實質對話紀錄喔！")
                     return
 
                 prompt = f"""請擔任群組對話脈絡拆解專家。請閱讀以下的群組聊天記錄，並將對話內容依據【話題/討論串性質】完全分類。
@@ -669,12 +710,9 @@ def handle_message(event):
                 res = safe_generate_content(prompt_contents=prompt, system_instruction=sys_inst, temperature=0.2)
                 result_text = res.text.strip()
                 
-                if result_text.startswith("```json"):
-                    result_text = result_text[7:]
-                if result_text.startswith("```"):
-                    result_text = result_text[3:]
-                if result_text.endswith("```"):
-                    result_text = result_text[:-3]
+                if result_text.startswith("```json"): result_text = result_text[7:]
+                if result_text.startswith("```"): result_text = result_text[3:]
+                if result_text.endswith("```"): result_text = result_text[:-3]
                 
                 topics_data = json.loads(result_text.strip())
 
@@ -682,14 +720,13 @@ def handle_message(event):
                 group_dramas[target_group_id] = {"topics": topics_data}
 
                 # 組合目錄
-                menu_msg = f"📺 【群組追劇目錄】(共拆解出 {len(topics_data)} 個討論串)\n"
+                menu_msg = f"📺 【群組追劇目錄 - {display_str}】(共拆解出 {len(topics_data)} 個討論串)\n"
                 menu_msg += "───────────────────\n"
                 for idx, item in enumerate(topics_data, 1):
                     menu_msg += f"🔹 【追劇 {idx}】{item.get('title', '無題')}\n   └ {item.get('summary', '')}\n"
                 menu_msg += "───────────────────\n"
                 menu_msg += "👉 輸入 `追劇 1`、`追劇 2` 即可觀看該主題的詳細成員對話！"
 
-                # 3. 運算完成後，使用 push_to_line 推播回群組
                 push_to_line(target_group_id, menu_msg)
 
             except Exception as e:
@@ -697,7 +734,7 @@ def handle_message(event):
                 push_to_line(target_group_id, "😅 追劇目錄解析失敗，請稍後再試一次！")
 
         # 啟動 Thread 背景執行
-        threading.Thread(target=process_drama_task, args=(group_id,)).start()
+        threading.Thread(target=process_drama_task, args=(group_id, target_date, date_display)).start()
         return
 
     # (C) 一般摘要：輸入 `摘要` 或 `摘要 100`
@@ -798,3 +835,51 @@ def handle_message(event):
         except Exception:
             reply_to_line(event.reply_token, "😅 AI 伺服器忙碌中，出題失敗，請稍後再試！")
         return
+    elif re.match(r"^[!！]回答\s+(.+)$", user_text):
+        ans = re.match(r"^[!！]回答\s+(.+)$", user_text).group(1).strip()
+        if group_id not in group_games or 'question' not in group_games[group_id]:
+            reply_to_line(event.reply_token, "目前沒有進行中的題目，請先輸入 `!出題` 喔！")
+        else:
+            u_name = get_user_name(group_id, user_id)
+            group_games[group_id]['answers'][u_name] = ans
+            ans_dict = group_games[group_id]['answers']
+            if len(ans_dict) < 2:
+                reply_to_line(event.reply_token, f"✅ {u_name} 已選擇【{ans}】！還需要至少 1 位成員輸入 `!回答`！")
+            else:
+                ans_summary = "\n".join([f"• {k}: {v}" for k, v in ans_dict.items()])
+                prompt = f"評定以下默契指數 (0%~100%) 與講評：\n{ans_summary}"
+                try:
+                    res = safe_generate_content(prompt_contents=prompt)
+                    reply_to_line(event.reply_token, f"🎯 【默契結算】\n\n成員選擇：\n{ans_summary}\n\n🤖 裁判講評：\n{res.text}")
+                except Exception:
+                    reply_to_line(event.reply_token, f"🎯 【默契結算】\n\n成員選擇：\n{ans_summary}\n\n（AI 忙碌中，你們這群人的默契自己心裡有數啦！）")
+                del group_games[group_id]
+        return
+
+    # 10. AI 智能對話與記憶
+    is_group = (source_type == "group")
+    is_cmd = user_text.startswith("!問") or user_text.startswith("！問") or user_text.startswith("!") or user_text.startswith("！")
+
+    is_mentioned = False
+    if hasattr(event.message, 'mention') and event.message.mention:
+        is_mentioned = True  
+
+    if is_group and not (is_cmd or is_mentioned):
+        return  
+
+    clean_msg = user_text
+    if clean_msg.startswith("!問") or clean_msg.startswith("！問"): 
+        clean_msg = clean_msg[2:].strip()
+    elif clean_msg.startswith("!") or clean_msg.startswith("！"): 
+        clean_msg = clean_msg[1:].strip()
+    
+    if not clean_msg: 
+        clean_msg = user_text
+
+    user_name = get_user_name(group_id, user_id)
+    reply_text = generate_ai_response(group_id, user_id, user_name, clean_msg)
+    reply_to_line(event.reply_token, reply_text)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
